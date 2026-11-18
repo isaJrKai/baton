@@ -1,0 +1,23 @@
+baton_version: 1
+default_branch: main
+token_budget: 6000
+execution:
+  mode: local
+  acknowledged: false
+  timeout_seconds: 300
+  docker_image: ""
+allowed_commands: []
+env_passthrough: []
+never_include:
+  - ".env*"
+  - "**/.env.*"
+  - "**/*.pem"
+  - "**/*.key"
+  - "**/id_*"
+  - "**/secrets/**"
+  - "**/.npmrc"
+  - "**/.pypirc"
+  - "**/.netrc"
+  - "**/.aws/credentials"
+  - "**/.aws/config"
+extra_secret_patterns: []

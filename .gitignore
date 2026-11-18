@@ -1,0 +1,11 @@
+project-memory/packets/
+project-memory/sessions/
+.baton/runs/
+.baton/tmp/
+.baton/cache/
+.baton/lock
+.baton/status.html
+# Build artifacts — should never be tracked
+node_modules/
+dist/
+.vite/

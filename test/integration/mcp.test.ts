@@ -1,0 +1,118 @@
+// Stage 5 (Reach): MCP server tests.
+// Protocol: initialize → tools/list → tools/call over stdio newline-delimited JSON-RPC.
+// Also verifies unknown methods return -32601 and in-flight calls complete before exit.
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { spawn, execSync } from 'node:child_process';
+
+const CLI_DIR = '/home/z/my-project/baton-cli';
+
+interface McpResponse {
+  jsonrpc: '2.0';
+  id?: number | string | null;
+  result?: { serverInfo?: { name: string; version: string }; protocolVersion?: string; tools?: { name: string }[]; content?: { type: string; text: string }[]; isError?: boolean };
+  error?: { code: number; message: string };
+}
+
+async function makeTempRepo(): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'baton-mcp-'));
+  execSync('git init -b main', { cwd: dir, stdio: 'pipe' });
+  execSync('git config user.email test@baton.local', { cwd: dir, stdio: 'pipe' });
+  execSync('git config user.name "Baton Test"', { cwd: dir, stdio: 'pipe' });
+  await writeFile(path.join(dir, 'README.md'), '# test\n');
+  execSync('git add -A && git commit -m "init"', { cwd: dir, stdio: 'pipe' });
+  return dir;
+}
+
+async function mcpExchange(repoDir: string, requests: object[]): Promise<McpResponse[]> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('npx', ['tsx', path.join(CLI_DIR, 'src/cli.ts'), 'mcp'], {
+      cwd: repoDir, stdio: ['pipe', 'pipe', 'pipe'], timeout: 60000,
+    });
+    let stdout = '';
+    child.stdout?.on('data', d => { stdout += d.toString(); });
+    child.stderr?.on('data', () => { /* ignore */ });
+    child.on('error', reject);
+    child.on('close', () => {
+      const lines = stdout.trim().split('\n').filter(l => l.length > 0);
+      resolve(lines.map(l => JSON.parse(l) as McpResponse));
+    });
+    for (const r of requests) {
+      child.stdin?.write(JSON.stringify(r) + '\n');
+    }
+    child.stdin?.end();
+  });
+}
+
+describe('Stage 5: baton mcp (stdio JSON-RPC)', () => {
+  let repoDir: string;
+
+  beforeEach(async () => {
+    repoDir = await makeTempRepo();
+    execSync(`npx tsx ${path.join(CLI_DIR, 'src/cli.ts')} init`, { cwd: repoDir, stdio: 'pipe' });
+  });
+
+  afterEach(async () => { await rm(repoDir, { recursive: true, force: true }); });
+
+  it('initializes with server info and protocol version', async () => {
+    const [init] = await mcpExchange(repoDir, [
+      { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} },
+    ]);
+    expect(init.id).toBe(1);
+    expect(init.result?.serverInfo?.name).toBe('baton');
+    expect(init.result?.protocolVersion).toBeTruthy();
+  });
+
+  it('lists tools including read-only ledger tools', async () => {
+    const [tools] = await mcpExchange(repoDir, [
+      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+    ]);
+    const names = (tools.result?.tools ?? []).map(t => t.name);
+    expect(names).toContain('list_tasks');
+    expect(names).toContain('get_task');
+    expect(names).toContain('get_packet');
+    expect(names).toContain('status');
+    expect(names).toContain('stale');
+    expect(names).toContain('conflicts');
+    expect(names).toContain('doctor');
+    expect(names).toContain('search_events');
+    // verify must NOT be exposed: it executes untrusted worker code (G21)
+    expect(names).not.toContain('verify');
+  });
+
+  it('answers async tool calls before exit and reports empty state', async () => {
+    const responses = await mcpExchange(repoDir, [
+      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'status', arguments: {} } },
+      { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'list_tasks', arguments: {} } },
+      { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'search_events', arguments: { limit: 5 } } },
+    ]);
+    expect(responses.length).toBe(3);
+    const byId = new Map(responses.map(r => [r.id, r]));
+    const status = byId.get(3);
+    expect(status?.result?.content?.[0]?.text).toContain('No tasks');
+    const tasks = byId.get(4);
+    expect(tasks?.result?.content?.[0]?.text).toContain('No tasks found.');
+    const search = byId.get(5);
+    expect(search?.result?.content?.[0]?.text).toContain('total: 0');
+  });
+
+  it('returns -32601 for unknown methods and -32700 for malformed JSON', async () => {
+    const child = spawn('npx', ['tsx', path.join(CLI_DIR, 'src/cli.ts'), 'mcp'], {
+      cwd: repoDir, stdio: ['pipe', 'pipe', 'pipe'], timeout: 60000,
+    });
+    let stdout = '';
+    child.stdout?.on('data', d => { stdout += d.toString(); });
+    child.stdin?.write('this is not json\n');
+    child.stdin?.write(JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'no/such/method' }) + '\n');
+    child.stdin?.end();
+    await new Promise<void>(resolve => child.on('close', () => resolve()));
+
+    const responses = stdout.trim().split('\n').filter(l => l.length > 0).map(l => JSON.parse(l) as McpResponse);
+    const parseError = responses.find(r => r.id === null);
+    expect(parseError?.error?.code).toBe(-32700);
+    const notFound = responses.find(r => r.id === 9);
+    expect(notFound?.error?.code).toBe(-32601);
+  });
+});

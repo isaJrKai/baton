@@ -1,0 +1,44 @@
+{
+  "name": "baton-cli",
+  "version": "1.2.0",
+  "description": "Repo-native continuity and verification kit for AI-assisted development",
+  "type": "module",
+  "bin": {
+    "baton": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsup src/cli.ts --format esm --dts --clean",
+    "dev": "tsx src/cli.ts",
+    "test": "npm run typecheck && vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --max-warnings 0",
+    "guard:network": "node scripts/guard-network.js",
+    "prepare": "npm run build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "commander": "12.1.0",
+    "picomatch": "4.0.7",
+    "yaml": "2.5.0",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "22.7.0",
+    "@types/picomatch": "^4.0.3",
+    "tsup": "8.3.0",
+    "tsx": "4.19.0",
+    "typescript": "5.6.2",
+    "vite": "5.4.0",
+    "vitest": "2.1.0"
+  },
+  "allowScripts": {
+    "esbuild@0.23.1": true,
+    "esbuild@0.21.5": true
+  },
+  "license": "MIT",
+  "files": [
+    "dist"
+  ]
+}
