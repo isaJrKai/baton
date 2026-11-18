@@ -1,0 +1,2 @@
+{"v":1,"id":"e-000001","ts":"2026-09-30T07:38:00.435Z","type":"decision_status","decision":"D-0002","from":"proposed","to":"proposed","hash":"30522695f329588b2ae152ac814fb6cdf1fd1d6001ce38a2c29bc48b3282bfd4"}
+{"v":1,"id":"e-000002","ts":"2026-09-30T07:38:08.037Z","type":"decision_status","decision":"D-0002","from":"proposed","to":"accepted","hash":"e9b84de23efa381252326be7ea3008d6c6a40c07d58ae9329502f88b1bf487fd"}

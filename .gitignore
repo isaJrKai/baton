@@ -1,0 +1,12 @@
+stage0-trial/
+stage0-trial
+project-memory/packets/
+project-memory/sessions/
+.baton/runs/
+.baton/tmp/
+.baton/cache/
+.baton/lock
+.baton/status.html
+node_modules/
+*.tsbuildinfo
+.DS_Store
