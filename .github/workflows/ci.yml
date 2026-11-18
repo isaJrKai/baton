@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node-version: [20, 22]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Install dependencies
+        run: npm install
+      - name: G24 network guard
+        run: npm run guard:network
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Tests
+        run: npm test
+
+# Cross-platform note:
+# - run-process.ts uses spawn() with argv array (no shell), which works cross-platform.
+# - However, `npm test` on Windows invokes `npm.cmd` — our cmd checks use `node --test`
+#   and `node <file>` directly, which work cross-platform because they resolve via PATH.
+# - The git wrapper uses `git` (not `git.exe`), which resolves via PATH on all platforms.
+# - Path separators: all internal paths are POSIX-normalized via toPosix() before matching.
+# - Status: UNTESTED on Windows/macOS in this environment (Linux only).
+#   The CI matrix above will produce the first real cross-platform results when run.

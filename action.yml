@@ -1,0 +1,91 @@
+name: 'Baton Verify'
+description: >
+  Run `baton verify` for a task inside CI. Verifies a worker's claims against
+  the mechanical checks defined in the task (tests, diff scope, greps, secrets,
+  report match) and appends a baton:ci status summary to the job step summary.
+branding:
+  icon: 'check-circle'
+  color: 'purple'
+
+inputs:
+  task-id:
+    description: 'Baton task ID to verify, e.g. T-0001'
+    required: true
+  base-branch:
+    description: 'Base branch to verify against (default: taken from .baton/policy.yml)'
+    required: false
+    default: 'main'
+  head:
+    description: 'Head commit SHA to verify (default: the PR head when available)'
+    required: false
+  baton-source:
+    description: 'Where to install baton from: npm or github'
+    required: false
+    default: 'npm'
+  baton-version:
+    description: 'baton-cli version when installing from npm (default: latest)'
+    required: false
+    default: 'latest'
+  baton-repo:
+    description: 'owner/repo when installing from github'
+    required: false
+    default: ''
+  baton-ref:
+    description: 'git ref when installing from github'
+    required: false
+    default: 'main'
+  run-doctor:
+    description: 'Also run `baton doctor` (structural integrity, exit 3 on errors)'
+    required: false
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Check out full history
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Node.js 20
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    - name: Install baton
+      shell: bash
+      run: |
+        if [ "${{ inputs.baton-source }}" = "github" ]; then
+          npm install -g "github:${{ inputs.baton-repo }}#${{ inputs.baton-ref }}"
+        else
+          npm install -g "baton-cli@${{ inputs.baton-version }}"
+        fi
+        baton --version
+
+    - name: Run baton doctor
+      if: ${{ inputs.run-doctor == 'true' }}
+      shell: bash
+      run: baton doctor
+
+    - name: Run baton verify
+      shell: bash
+      env:
+        BATON_TASK_ID: ${{ inputs.task-id }}
+        BATON_HEAD: ${{ inputs.head }}
+      run: |
+        # Prefer an explicit head input; fall back to the PR head commit.
+        if [ -z "$BATON_HEAD" ] && [ -n "${{ github.event.pull_request.head.sha }}" ]; then
+          BATON_HEAD="${{ github.event.pull_request.head.sha }}"
+        fi
+        if [ -n "$BATON_HEAD" ]; then
+          baton verify "$BATON_TASK_ID" --head "$BATON_HEAD"
+        else
+          baton verify "$BATON_TASK_ID"
+        fi
+
+    - name: Append baton:ci summary
+      if: always()
+      shell: bash
+      run: |
+        echo "# Baton status" >> "$GITHUB_STEP_SUMMARY"
+        baton status --ci >> "$GITHUB_STEP_SUMMARY" || true
