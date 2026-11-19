@@ -2,13 +2,14 @@
 // Worker branches from main at commit X. Main advances (ledger commit).
 // verify must diff from merge-base(base, head), NOT from main's tip.
 // If it diffed from main's tip, the ledger commit would appear as an out-of-scope change.
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile, mkdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 
-const CLI_DIR = '/home/z/my-project/baton-cli';
+const CLI_DIR = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '../..');
 
 function runBaton(args: string[], cwd: string): { stdout: string; stderr: string; code: number } {
   const ledgerWriteCommands = new Set(['verify', 'accept', 'reject', 'packet', 'report-check', 'decide']);

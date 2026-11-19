@@ -11,7 +11,8 @@ export function strengthOf(type: string): Strength {
     case 'grep':
     case 'file_exists':  return 'artifact';
     case 'diff_scope':
-    case 'no_secrets':   return 'hygiene';
+    case 'no_secrets':
+    case 'protected_paths': return 'hygiene';
     default:             return 'hygiene';
   }
 }

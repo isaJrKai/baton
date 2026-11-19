@@ -5,13 +5,14 @@
 // - timeout says "timed out after Ns" not "exit null"
 // - hanging child that spawns a grandchild: BOTH killed at timeout
 // - last 20 lines of failing check printed in reason
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile, mkdir, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 
-const CLI_DIR = '/home/z/my-project/baton-cli';
+const CLI_DIR = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '../..');
 
 function runBaton(args: string[], cwd: string): { stdout: string; stderr: string; code: number } {
   const ledgerWriteCommands = new Set(['verify', 'accept', 'reject', 'packet', 'report-check', 'decide']);

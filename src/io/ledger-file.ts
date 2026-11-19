@@ -13,6 +13,40 @@ function ledgerFile(repoRoot: string): string {
 }
 
 /**
+ * Absolute path of the ledger file (exported for doctor --fix).
+ */
+export function ledgerPath(repoRoot: string): string {
+  return ledgerFile(repoRoot);
+}
+
+/**
+ * Rewrite the entire ledger atomically (tmp + rename + fsync). Used only by
+ * `baton doctor --fix` after a union merge renumbers event IDs. Caller must
+ * hold the lock (withLock) across the whole read-modify-write transaction.
+ */
+export async function rewriteLedger(repoRoot: string, events: LedgerEvent[]): Promise<void> {
+  const { rename } = await import('node:fs/promises');
+  const lines = events.map(e => {
+    const line = JSON.stringify(e) + '\n';
+    if (Buffer.byteLength(line) > MAX_LINE_BYTES) {
+      throw new Error(`ledger line exceeds 64KB: ${e.id}`);
+    }
+    return line;
+  }).join('');
+  const target = ledgerFile(repoRoot);
+  const tmp = target + '.tmp';
+  await mkdir(path.dirname(target), { recursive: true });
+  const fh = await open(tmp, 'w');
+  try {
+    await fh.writeFile(lines);
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  await rename(tmp, target);
+}
+
+/**
  * Append a single ledger event. Holds lock for the entire transaction:
  * read tail to confirm last id -> write line -> fsync -> release lock.
  * Per P0-8.

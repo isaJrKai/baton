@@ -4,13 +4,14 @@
 // - baton done: Definition of Done gate (exit 1 while work pending)
 // - baton workers: reputation derived from report front matter + ledger
 // - full lifecycle: ready -> packet -> worker branch -> verify -> accept -> done exits 0
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 
-const CLI_DIR = '/home/z/my-project/baton-cli';
+const CLI_DIR = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '../..');
 
 function runBaton(args: string[], cwd: string): { stdout: string; stderr: string; code: number } {
   const ledgerWriteCommands = new Set(['verify', 'accept', 'reject', 'packet', 'report-check', 'decide']);

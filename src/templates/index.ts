@@ -169,6 +169,14 @@ execution:
   docker_image: ""
 allowed_commands: []
 env_passthrough: []
+# v1.3.1: files the worker is judged by. If a worker edits these and the task
+# does not set allow_protected, verify restores the merge-base versions before
+# running checks and fails the protected_paths row. Set to [] to disable.
+protected_paths:
+  - "test/**"
+  - "tests/**"
+  - "**/*.test.*"
+  - "**/*.spec.*"
 never_include:
   - ".env*"
   - "**/.env.*"

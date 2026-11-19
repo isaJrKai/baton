@@ -1,5 +1,51 @@
 # Changelog
 
+## 1.3.1 — Tightening: merge repair, locked tests, portability
+
+Hardening from the first external review. No new features — fixes to make the
+existing ones safe under real multi-branch use.
+
+### Ledger survives union merges (`baton doctor --fix`)
+- Two worker branches that both append ledger events allocate the same event
+  IDs from the same base; the `merge=union` driver (.gitattributes) then
+  concatenates both sides into a ledger with duplicate IDs and broken
+  monotonicity. This is now a tested, detected, repaired state:
+  - `baton doctor` reports `E_DUPLICATE_EVENT_ID` (new) and
+    `E_NON_INCREASING_ID` with a repair hint.
+  - `baton doctor --fix` renumbers events in file order, remaps colliding
+    claim IDs (c-XXXX) and run IDs (r-XXXX) consistently (first occurrence
+    keeps the ID; each collision is a distinct claim/run from the other
+    branch; follow-up events follow the most recent), and appends a
+    `ledger_repaired` event recording exactly what changed.
+  - Refuses to run when the ledger has malformed lines — repair never guesses.
+- Integration tests reproduce the merge end-to-end (packet on both branches,
+  real `git merge`, detection, repair, continued ID allocation) plus a
+  synthetic claim/run collision remap.
+
+### Workers are judged by the locked tests (`protected_paths`)
+- A worker can no longer weaken the tests it is judged by. If the worker
+  modifies a file matching `protected_paths` (new policy key; default:
+  `test/**`, `tests/**`, `**/*.test.*`, `**/*.spec.*`) and the task does not
+  set `allow_protected`, verify restores the merge-base versions into the
+  worktree before running any check and adds a failing `protected_paths` row.
+- Tasks that legitimately change tests: `baton task new --allow-protected`
+  (stored in front matter, covered by the lock hash). Verify then runs the
+  worker's versions and shows a passing `protected_paths` row with a note.
+- `baton init` scaffolds `protected_paths` in policy.yml; set it to `[]` to
+  disable.
+
+### Naming + portability
+- One name everywhere: the package is `baton` (repo `isaJrKai/baton`, binary
+  `baton`). Install with `npm install -g github:isaJrKai/baton`; the GitHub
+  Action is `isaJrKai/baton@v1`.
+- Integration tests resolve the CLI relative to the test file instead of a
+  hardcoded path — the suite now runs from any checkout (and in CI).
+- README no longer claims the ledger is hash-chained: hashes cover artifacts
+  (task locks, reports, packets, run logs); the ledger itself is append-only
+  JSONL with strictly increasing IDs, and `doctor --fix` is the documented
+  post-merge reconciliation step.
+
+
 ## 1.3.0 — Stage 5 Reach + orchestrator core (merged line)
 
 This release merges two sibling v1.3.0 lines (the MCP/CI-gate build and the

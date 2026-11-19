@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -17,7 +18,7 @@ async function writeCliWrapper(targetDir: string): Promise<void> {
   // No wrapper needed — we use `npx tsx src/cli.ts ...` from baton-cli/ directory
 }
 
-const CLI_DIR = '/home/z/my-project/baton-cli';
+const CLI_DIR = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '../..');
 
 function runBaton(args: string[], cwd: string): { stdout: string; stderr: string; code: number } {
   // Auto-append --allow-branch to ledger-writing commands when not on main.

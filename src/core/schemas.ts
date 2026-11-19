@@ -66,6 +66,10 @@ export const TaskSchema = z.object({
   reads: z.array(z.string()).optional(),
   decisions: z.array(z.string().regex(/^D-\d{4}$/)).optional(),
   non_goals: z.array(z.string()).optional(),
+  // v1.3.1: set on the task when the worker is explicitly allowed to edit
+  // protected paths (e.g. the task legitimately updates tests). Written by
+  // `baton task new --allow-protected`; verified as part of the locked hash.
+  allow_protected: z.boolean().optional(),
   checks: z.array(CheckSchema).min(1),
 }).strict().superRefine((t, ctx) => {
   // G9 + spec §3.5: touches must be POSIX repo-relative, no .., no leading / or ./
@@ -172,6 +176,15 @@ export const PolicySchema = z.object({
   })).default([]),
   // v1.3: retrieved-context tier size in packets. 0 disables the tier.
   retrieval_snippets: z.number().int().min(0).max(20).default(6),
+  // v1.3.1: files the worker is judged by. If a worker edits these and the task
+  // does not set allow_protected, verify restores the merge-base versions before
+  // running checks and fails a protected_paths row. Set [] to disable.
+  protected_paths: z.array(z.string()).default([
+    'test/**',
+    'tests/**',
+    '**/*.test.*',
+    '**/*.spec.*',
+  ]),
 }).strict();
 export type Policy = z.infer<typeof PolicySchema>;
 
@@ -310,6 +323,15 @@ export const LedgerEventSchema = z.discriminatedUnion('type', [
   baseEvent.extend({
     type: z.literal('lease_released'),
     task: z.string().regex(/^T-\d{4}$/),
+    reason: z.string(),
+  }),
+  baseEvent.extend({
+    // v1.3.1: written by `baton doctor --fix` after a union merge of two
+    // branches that both appended ledger events. Records what was repaired.
+    type: z.literal('ledger_repaired'),
+    renumbered_events: z.number().int().min(0),
+    remapped_claims: z.number().int().min(0),
+    remapped_runs: z.number().int().min(0),
     reason: z.string(),
   }),
 ]);

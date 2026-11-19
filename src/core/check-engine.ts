@@ -5,13 +5,13 @@
 // v1.2 §6.7: run logs persisted to .baton/runs/<run>/<check>.log, {path,sha256} in check_result
 // v1.2 §6.7: last 20 lines of failing check printed, sanitized (G18)
 // v1.2 G22: killed as a process tree on timeout
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { Check, Policy } from './schemas.js';
 import { scan } from './secrets.js';
 import { isMatch } from './globs.js';
 import { run } from '../io/run-process.js';
-import { diffNameStatus, diffNameOnly } from '../io/git.js';
+import { diffNameStatus, diffNameOnly, readFileAtRef } from '../io/git.js';
 import { sha256Sync } from '../io/hash.js';
 
 export type CheckResult = {
@@ -391,6 +391,71 @@ async function runReportMatches(ctx: CheckContext): Promise<CheckResult> {
       result: 'fail', reason: `report_matches error: ${(err as Error).message}`,
     };
   }
+}
+
+/**
+ * v1.3.1: enforce protected paths (the files the worker is judged by).
+ *
+ * If the worker modified a protected file (policy.protected_paths) and the task
+ * does not set allow_protected, the merge-base versions are restored into the
+ * worktree BEFORE any check runs — so cmd/grep/file_exists/contract checks are
+ * always judged by the locked tests, never the worker's edits — and a failing
+ * `protected_paths` row is returned for the verdict table.
+ *
+ * With allow_protected=true the worker's versions are used (the task is
+ * legitimately about updating tests), surfaced as a passing row with a note.
+ *
+ * Returns { row: null } when the worker did not touch any protected path.
+ */
+export async function enforceProtectedPaths(
+  ctx: CheckContext,
+  allowProtected: boolean,
+): Promise<{ row: CheckResult | null; restored: string[] }> {
+  const globs = ctx.policy.protected_paths ?? [];
+  if (globs.length === 0) return { row: null, restored: [] };
+  const changed = await diffNameOnly(ctx.repoRoot, ctx.baseCommit, ctx.headCommit);
+  const hits = changed.filter(p => globs.some(g => isMatch(p, g)));
+  if (hits.length === 0) return { row: null, restored: [] };
+
+  const listed = hits.slice(0, 5).join(', ') + (hits.length > 5 ? ', ...' : '');
+
+  if (allowProtected) {
+    return {
+      row: {
+        id: 'protected_paths', type: 'protected_paths',
+        result: 'pass',
+        reason: `worker modified protected files with explicit allow_protected — judged by worker versions: ${listed}`,
+      },
+      restored: [],
+    };
+  }
+
+  // Restore merge-base versions into the worktree so checks run against the
+  // locked tests. Files added by the worker (absent at the merge-base) are
+  // removed from the worktree.
+  const restored: string[] = [];
+  for (const p of hits) {
+    const abs = path.join(ctx.worktreePath, p);
+    try {
+      const baseContent = await readFileAtRef(ctx.repoRoot, ctx.baseCommit, p);
+      await mkdir(path.dirname(abs), { recursive: true });
+      await writeFile(abs, baseContent, 'utf8');
+    } catch {
+      // Not present at merge-base — the worker added this file. Remove it so
+      // checks see the base state.
+      await rm(abs, { force: true }).catch(() => {});
+    }
+    restored.push(p);
+  }
+
+  return {
+    row: {
+      id: 'protected_paths', type: 'protected_paths',
+      result: 'fail',
+      reason: `worker modified protected files (${listed}); checks ran against the locked merge-base versions. If the task legitimately changes tests, create it with --allow-protected.`,
+    },
+    restored,
+  };
 }
 
 /**

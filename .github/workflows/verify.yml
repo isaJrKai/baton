@@ -1,7 +1,7 @@
 # Self-hosted example: verify a task with the action in this repository.
-# Once baton-cli is published to npm, downstream repos can use it directly:
+# Downstream repos can use it directly:
 #
-#   - uses: <owner>/baton-cli/verify-action@v1   (or actions/checkout + baton verify)
+#   - uses: isaJrKai/baton@v1   (or actions/checkout + baton verify)
 #
 # Run manually: gh workflow run verify.yml -f task-id=T-0001
 name: Baton Verify (example)

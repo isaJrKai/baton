@@ -26,13 +26,13 @@ Handing a task to an AI model today works like this: you paste a long briefing, 
 
 1. **Packets** — the task compiles into a short structured brief (250–1100 tokens vs 2000–3000 freeform) with a trusted header, constraints, decisions, and an explicit `Omitted:` footer for everything cut.
 2. **Checks** — every task carries mechanical checks: `cmd` (run tests), `diff_scope` (only allowed files may change), `grep` (must / must-not match), `file_exists`, `contract`, `no_secrets`, `report_matches`.
-3. **Ledger** — every event (packet issued, claim made, check result, accept/reject) is an append-only line in `project-memory/ledger.jsonl`, replayable and hash-chained for audit.
+3. **Ledger** — every event (packet issued, claim made, check result, accept/reject) is an append-only line in `project-memory/ledger.jsonl`, replayable for audit. Hashes cover the artifacts (task locks, reports, packets, run logs); the ledger itself is append-only JSONL with strictly increasing IDs, and `baton doctor --fix` is the documented reconciliation step after merging diverged branches.
 4. **Memory** — `project-memory/` carries state (STATE.md), doctrine (DECISIONS.md), evidence (claims + ledger), and provenance (git history). Freshness decays: when anchor files change, verified claims go `stale`.
 
 ## Quickstart
 
 ```bash
-npm install -g baton-cli        # or: npm install -g github:<owner>/baton-cli
+npm install -g github:isaJrKai/baton
 baton init                      # scaffold project-memory/, .baton/policy.yml, pointer blocks
 
 baton decide "Globs use picomatch with dot:true" --key core.globs --areas "src/core/**"
@@ -60,7 +60,7 @@ Baton never merges. Accept records the verdict; merge through your normal PR pro
 | --- | --- |
 | `baton init` | Scaffold `project-memory/`, `.baton/policy.yml`, pointer blocks. `--rules-file <path>` also writes the pointer to `.cursorrules` etc. |
 | `baton decide` / `decide accept\|reject` | Record architectural decisions with `areas` (globs) |
-| `baton task new\|ready\|list\|show\|lint\|block\|unblock\|unlock` | Task lifecycle; `ready` locks with hash; `lint` shows check strength |
+| `baton task new\|ready\|list\|show\|lint\|block\|unblock\|unlock` | Task lifecycle; `ready` locks with hash; `lint` shows check strength; `new --allow-protected` lets the task change test files |
 | `baton packet <T-id>` | Compile the worker brief under a token budget |
 | `baton report check <path>` | Validate a closeout report against the real diff |
 | `baton verify <T-id>` | Run all checks in a detached worktree; verdict table with check strength |
@@ -68,7 +68,7 @@ Baton never merges. Accept records the verdict; merge through your normal PR pro
 | `baton stale` | Claims whose anchor files changed since verification |
 | `baton conflicts` | Decision and claim conflicts (`--ack` / `--unack`) |
 | `baton status` | Summary; `--html` single-file page; `--ci` Markdown table for PR comments |
-| `baton doctor` | Structural integrity: ledger, hashes, duplicates, orphan worktrees |
+| `baton doctor` | Structural integrity: ledger, hashes, duplicates, orphan worktrees. `--fix` repairs ledger ID collisions from merged branches |
 | `baton log` | Ledger history |
 | `baton search <query>` | v1.3: BM25 retrieval over repo files (`--top`, `--glob`, `--json`). Without a query: filtered ledger search (`--task`, `--type`, `--last`, `--limit`, `--offset`) |
 | `baton next` | v1.3: deterministic scheduler — next eligible task (deps done, no area conflict with in-flight work) |
@@ -120,6 +120,28 @@ The orchestrator is deterministic tooling around the same ledger — no AI in th
   `baton done` exits 0 only when all gates pass. This is the signal an orchestrator (human or machine) should act on — not a vibes check.
 - `baton gate` — CI-facing health gate (doctor + stale dry-run + conflicts + task flow). `baton gate --init` writes `.github/workflows/baton-gate.yml` so the repo self-instruments its own CI.
 
+## Locked tests (v1.3.1)
+
+`diff_scope` stops edits outside the allowed files — but when test files are *inside* scope, a worker could rewrite the very tests it is judged by. Verify closes that hole:
+
+- `protected_paths` in `.baton/policy.yml` (default: `test/**`, `tests/**`, `**/*.test.*`, `**/*.spec.*`) lists the files workers are judged by.
+- If a worker modifies a protected file and the task does not set `allow_protected`, verify **restores the merge-base versions into the worktree before running any check** — so cmd/grep/file_exists checks always judge the locked tests, never the worker's edits — and adds a failing `protected_paths` row to the verdict.
+- A task that legitimately changes tests says so up front: `baton task new "..." --allow-protected`. Verify then judges with the worker's versions and shows a passing `protected_paths` row with a note. The flag lives in the task front matter, inside the lock hash.
+
+## Merging diverged branches (v1.3.1)
+
+Worker branches append ledger events, and `project-memory/ledger.jsonl` carries `merge=union` in `.gitattributes` so merges auto-resolve. Two branches allocating from the same base produce duplicate event IDs after the merge — that is expected, detected, and repaired, never silent:
+
+```bash
+git merge worker-a --no-edit
+baton doctor        # exit 3: E_DUPLICATE_EVENT_ID / E_NON_INCREASING_ID
+baton doctor --fix  # renumber events, remap colliding claim/run IDs,
+                    # append a ledger_repaired audit event
+baton doctor        # clean; ID allocation continues from the repaired tail
+```
+
+`--fix` refuses to run when the ledger has malformed (unparseable) lines — repair never guesses.
+
 ## Stage history
 
 | Version | Stage | Contents |
@@ -128,6 +150,7 @@ The orchestrator is deterministic tooling around the same ledger — no AI in th
 | 1.1.x | 1–2 | packets + verify with the 14 P0 fixes |
 | 1.2.0 | 3–4 | staleness, conflicts, status/log/doctor, worktree orphan GC |
 | 1.3.0 | 5 | **MCP server, CI gate (`baton gate`), BM25 retrieval tier, `baton search`, area leases, scheduler (`baton next`), reputation (`baton workers`), escalation, computable DoD (`baton done`)** |
+| 1.3.1 | tighten | no new features: union-merge repair (`doctor --fix`), locked tests (`protected_paths` + `--allow-protected`), one name (`baton`), portable tests |
 | next | 6+ | deterministic dispatch loop on top of leases; DAG ordering; merge queue |
 
 ## GitHub Action
@@ -135,11 +158,11 @@ The orchestrator is deterministic tooling around the same ledger — no AI in th
 `.github/workflows/verify.yml` (this repo) is a working example. In another repo:
 
 ```yaml
-- uses: <owner>/baton-cli@main
+- uses: isaJrKai/baton@v1
   with:
     task-id: T-0001
     baton-source: github        # or npm once published
-    baton-repo: <owner>/baton-cli
+    baton-repo: isaJrKai/baton
 ```
 
 It runs `baton doctor`, then `baton verify` for the task at the PR head, and appends a `baton:ci` Markdown summary to the step summary. A failing check fails the job — verified claims, not vibes, gate the PR.
@@ -148,6 +171,7 @@ It runs `baton doctor`, then `baton verify` for the task at the PR head, and app
 
 - All git access goes through one wrapper allowlisting read-only subcommands plus `worktree add --detach / remove / list`; `git config` is explicitly forbidden (G6/G7).
 - Verification runs only in temporary detached worktrees under `.baton/tmp/`, never your working directory (G8). Orphaned worktrees from killed runs are cleaned by PID on startup.
+- Workers are judged by the locked tests: `protected_paths` (test globs by default) are restored from the merge-base before checks run, and a worker's edit to them fails `protected_paths` unless the task was created with `--allow-protected`.
 - Worker code execution is explicit: `cmd` checks require an allowlisted command and `--yes` acknowledgment (G21).
 - Secrets are scanned from diffs with pattern masking; credential files (`**/.npmrc`, `**/.aws/credentials`, …) are excluded from packet inclusion by `never_include`.
 - Packets separate the trusted header from untrusted context — injection through task text cannot alter the contract.
@@ -181,7 +205,7 @@ npm test              # typecheck + vitest (integration tests build real git rep
 npm run guard:network # G24: no network imports in src/
 ```
 
-Status: Stage 1 (Packets), Stage 2 (Verify), Stage 3 (Freshness), Stage 4 (View), Stage 5 (Reach: MCP + GitHub Action) implemented; v1.3 adds the retrieval tier and the orchestrator core (scheduler, escalation, reputation, DoD gate). Node >= 20.
+Status: Stage 1 (Packets), Stage 2 (Verify), Stage 3 (Freshness), Stage 4 (View), Stage 5 (Reach: MCP + GitHub Action) implemented; v1.3 adds the retrieval tier and the orchestrator core (scheduler, escalation, reputation, DoD gate); v1.3.1 hardens the merge story and locks the tests workers are judged by. Feature-frozen until the tool has 10 real handoffs behind it. Node >= 20.
 
 ## License
 

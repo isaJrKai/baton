@@ -1,5 +1,6 @@
 // Stage 2.5 Item 7: Missing tests from spec §6.8.
 // Tests marked MISSING in the mapping table.
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile, mkdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -7,7 +8,7 @@ import path from 'node:path';
 import { execSync } from 'node:child_process';
 import { verdict, strengthOf } from '../../src/core/verdicts.js';
 
-const CLI_DIR = '/home/z/my-project/baton-cli';
+const CLI_DIR = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '../..');
 
 function runBaton(args: string[], cwd: string): { stdout: string; stderr: string; code: number } {
   const ledgerWriteCommands = new Set(['verify', 'accept', 'reject', 'packet', 'report-check', 'decide']);

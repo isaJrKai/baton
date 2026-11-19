@@ -83,6 +83,7 @@ export interface TaskNewOpts {
   title: string;
   touches: string[];
   depends?: string[];
+  allowProtected?: boolean;
 }
 
 export async function taskNew(repoRoot: string, opts: TaskNewOpts): Promise<string> {
@@ -109,6 +110,9 @@ export async function taskNew(repoRoot: string, opts: TaskNewOpts): Promise<stri
     };
     if (opts.depends && opts.depends.length > 0) {
       fm.depends_on = opts.depends;
+    }
+    if (opts.allowProtected) {
+      fm.allow_protected = true;
     }
     // Validate
     TaskSchema.parse(fm);

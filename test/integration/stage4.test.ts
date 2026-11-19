@@ -1,13 +1,14 @@
 // Stage 4 tests: HTML status page. Spec §8.5.
 // XSS payloads in claims and reports appear escaped; output contains no <script>, src=, or href=;
 // snapshot test; two runs identical.
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile, mkdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 
-const CLI_DIR = '/home/z/my-project/baton-cli';
+const CLI_DIR = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '../..');
 
 function runBaton(args: string[], cwd: string): { stdout: string; stderr: string; code: number } {
   const quotedArgs = args.map(a => a.includes(' ') ? `"${a}"` : a);

@@ -1,13 +1,14 @@
 // Stage 5 (Reach): MCP server tests.
 // Protocol: initialize → tools/list → tools/call over stdio newline-delimited JSON-RPC.
 // Also verifies unknown methods return -32601 and in-flight calls complete before exit.
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn, execSync } from 'node:child_process';
 
-const CLI_DIR = '/home/z/my-project/baton-cli';
+const CLI_DIR = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '../..');
 
 interface McpResponse {
   jsonrpc: '2.0';

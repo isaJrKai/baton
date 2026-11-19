@@ -1,13 +1,14 @@
 // Stage 2 integration tests: verify catches bad work.
 // Per spec §6.10 manual acceptance: "Branch B also edits a migration file outside scope
 // and claims 'no other files touched': exits 6 with scope and report_matches failing."
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile, mkdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 
-const CLI_DIR = '/home/z/my-project/baton-cli';
+const CLI_DIR = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '../..');
 
 function runBaton(args: string[], cwd: string): { stdout: string; stderr: string; code: number } {
   // Quote any arg containing spaces so commander parses it as a single value.

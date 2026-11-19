@@ -12,7 +12,7 @@ import { appendLedger, readLedger, nextEventId, nextRunId, nextClaimId } from '.
 import {
   git, getCommitSha, fileExistsAtRef, readFileAtRef, isValidRefName,
 } from '../io/git.js';
-import { runAllChecks, type CheckResult } from '../core/check-engine.js';
+import { runAllChecks, enforceProtectedPaths, type CheckResult } from '../core/check-engine.js';
 import { verdict, strengthOf } from '../core/verdicts.js';
 import { replay } from '../core/ledger-replay.js';
 import { spawn } from 'node:child_process';
@@ -209,7 +209,11 @@ export async function verify(
       runId,
       taskId,
     };
+    // v1.3.1: protected paths — a worker cannot weaken the tests it is judged by.
+    // Must run BEFORE checks so cmd/grep/etc. see the locked merge-base versions.
+    const protectedOutcome = await enforceProtectedPaths(ctx, task.allow_protected === true);
     results = await runAllChecks(ctx, task.checks);
+    if (protectedOutcome.row) results.push(protectedOutcome.row);
   } finally {
     await removeWorktree(repoRoot, wtPath);
   }

@@ -14,7 +14,7 @@ import { cleanupStaleWorktrees } from './io/git.js';
 import { stale, formatStaleTable } from './commands/stale.js';
 import { conflicts, formatConflictsTable } from './commands/conflicts.js';
 import { status, formatStatusOutput, formatCiSummary } from './commands/status.js';
-import { doctor, formatDoctorOutput } from './commands/doctor.js';
+import { doctor, doctorFix, formatDoctorOutput } from './commands/doctor.js';
 import { logCommand } from './commands/log.js';
 import { statusHtml } from './commands/status-html.js';
 import { search, formatSearchResults, searchFiles, formatFileResults } from './commands/search.js';
@@ -142,7 +142,8 @@ task
   .command('new <title>')
   .option('--touches <globs>', 'comma-separated globs for allowed files')
   .option('--depends <t-ids>', 'comma-separated task IDs this depends on')
-  .action(async (title: string, opts: { touches?: string; depends?: string }) => {
+  .option('--allow-protected', 'worker may edit protected_paths (test files) — verify will judge with the worker versions')
+  .action(async (title: string, opts: { touches?: string; depends?: string; allowProtected?: boolean }) => {
     if (!opts.touches) {
       console.error('ERROR task new: --touches is required');
       process.exit(2);
@@ -152,6 +153,7 @@ task
         title,
         touches: opts.touches.split(',').map(s => s.trim()).filter(Boolean),
         depends: opts.depends ? opts.depends.split(',').map(s => s.trim()).filter(Boolean) : undefined,
+        allowProtected: opts.allowProtected === true,
       });
       console.log(`Created task ${id} (draft). Edit the file, commit on main, then run: baton task ready ${id}`);
     } catch (err) {
@@ -489,10 +491,22 @@ program
 program
   .command('doctor')
   .description('check structural integrity')
+  .option('--fix', 'repair ledger ID collisions from merged branches (renumber + remap claim/run IDs)')
   .option('--allow-branch', 'allow running on non-base branch')
-  .action(async (opts: { allowBranch?: boolean }) => {
+  .action(async (opts: { fix?: boolean; allowBranch?: boolean }) => {
     try {
-      const result = await doctor(process.cwd());
+      let result = await doctor(process.cwd());
+      if (opts.fix && result.hasErrors) {
+        const fix = await doctorFix(process.cwd());
+        if (fix.changed) {
+          console.log(`repair: renumbered ${fix.renumbered} event(s), remapped ${fix.remappedClaims} claim ID(s), remapped ${fix.remappedRuns} run ID(s); ledger_repaired event appended`);
+        } else {
+          console.log('repair: ledger already consistent, nothing to do');
+        }
+        result = await doctor(process.cwd());
+      } else if (opts.fix) {
+        console.log('repair: not needed, no ledger errors found');
+      }
       console.log(formatDoctorOutput(result));
       if (result.hasErrors) process.exit(3);
     } catch (err) {
