@@ -17,6 +17,8 @@ import { search, searchFiles } from '../commands/search.js';
 import { next } from '../commands/next.js';
 import { done } from '../commands/done.js';
 import { workers } from '../commands/workers.js';
+import { leaseTake, leaseRelease, leaseList } from '../commands/lease.js';
+import { gate } from '../commands/gate.js';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -191,13 +193,9 @@ const TOOLS: ToolDef[] = [
     inputSchema: { type: 'object', properties: {} },
     handler: async (_args, repoRoot) => {
       const r = await done(repoRoot);
-      if (r.done) return 'PROJECT DONE. All tasks accepted, doctor clean, no conflicts.';
-      const lines = ['NOT DONE.'];
-      if (r.pending.length > 0) lines.push(`pending: ${r.pending.map(p => `${p.id}(${p.status}${p.escalated ? ',escalated' : ''})`).join(', ')}`);
-      if (r.escalated.length > 0) lines.push(`escalated: ${r.escalated.join(', ')}`);
-      if (r.doctorErrors.length > 0) lines.push(`doctor errors: ${r.doctorErrors.map(e => e.code).join(', ')}`);
-      if (r.claimConflicts > 0) lines.push(`claim conflicts: ${r.claimConflicts}`);
-      return lines.join('\n');
+      if (r.done) return 'BATON: DONE. All gates passed.';
+      const failed = r.gates.filter(g => !g.pass);
+      return 'BATON: NOT DONE.\n' + failed.map(g => `FAIL ${g.id} ${g.label}: ${g.detail}`).join('\n');
     },
   },
   {
@@ -208,6 +206,75 @@ const TOOLS: ToolDef[] = [
       const { workers: list } = await workers(repoRoot);
       if (list.length === 0) return 'No worker reputation yet (no reports with worker: front matter).';
       return list.map(w => `${w.worker}: score ${w.score} (accepted ${w.accepted}, rejected ${w.rejected}, verify_fails ${w.verifyFailures})`).join('\n');
+    },
+  },
+  {
+    name: 'lease_take',
+    description: 'Take an exclusive area lease for a task (T-xxxx) before starting work. Refused if an overlapping lease is active. Writes lease_acquired to the ledger.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', pattern: '^T-\\d{4}$' },
+        worker: { type: 'string', description: 'worker identity (agent name/id)' },
+        ttl_minutes: { type: 'number', description: 'lease TTL in minutes (default 120)' },
+        allow_branch: { type: 'boolean' },
+      },
+      required: ['task_id', 'worker'],
+      additionalProperties: false,
+    },
+    handler: async (args, repoRoot) => {
+      const result = await leaseTake(repoRoot, String(args.task_id), {
+        worker: String(args.worker),
+        ttlMinutes: typeof args.ttl_minutes === 'number' ? Math.max(1, Math.floor(args.ttl_minutes)) : 120,
+        allowBranch: args.allow_branch === true,
+      });
+      return JSON.stringify({ leased: true, ...result }, null, 2);
+    },
+  },
+  {
+    name: 'lease_list',
+    description: 'List active (unexpired, unreleased) area leases. Read-only.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    handler: async (_args, repoRoot) => {
+      const leases = await leaseList(repoRoot);
+      if (leases.length === 0) return 'No active leases.';
+      return JSON.stringify(leases, null, 2);
+    },
+  },
+  {
+    name: 'lease_release',
+    description: 'Release the area lease on a task (T-xxxx). Writes lease_released to the ledger.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', pattern: '^T-\\d{4}$' },
+        reason: { type: 'string' },
+        allow_branch: { type: 'boolean' },
+      },
+      required: ['task_id', 'reason'],
+      additionalProperties: false,
+    },
+    handler: async (args, repoRoot) => {
+      const result = await leaseRelease(repoRoot, String(args.task_id), {
+        reason: String(args.reason),
+        allowBranch: args.allow_branch === true,
+      });
+      return JSON.stringify({ released: true, ...result }, null, 2);
+    },
+  },
+  {
+    name: 'gate',
+    description: 'CI health gate (read-only): doctor + stale dry-run + unacknowledged conflicts + task flow. Returns pass/fail per check.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        strict_done: { type: 'boolean', description: 'also require all baton done gates to pass' },
+      },
+      additionalProperties: false,
+    },
+    handler: async (args, repoRoot) => {
+      const result = await gate(repoRoot, { strictDone: args.strict_done === true });
+      return result.checks.map(c => `${c.pass ? 'PASS' : 'FAIL'}  ${c.name}: ${c.detail}`).join('\n') + (result.pass ? '\nGATE: PASS' : '\nGATE: FAIL');
     },
   },
 ];
@@ -242,6 +309,7 @@ function writeMessage(obj: unknown): void {
 
 export async function runMcpServer(repoRoot: string): Promise<void> {
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
+  let toolQueue: Promise<void> = Promise.resolve();
 
   // Wait for in-flight tool calls before exiting when stdin closes.
   let pending = 0;
@@ -292,7 +360,10 @@ export async function runMcpServer(repoRoot: string): Promise<void> {
         const name = String(params.name ?? '');
         const args = (params.arguments ?? {}) as Record<string, unknown>;
         pending++;
-        callTool(name, args, repoRoot)
+        // Serialize tool calls: several tools write the ledger (lease_take,
+        // packet issuance) — concurrent execution would race on the ledger.
+        toolQueue = toolQueue
+          .then(() => callTool(name, args, repoRoot))
           .then(result => writeMessage({ jsonrpc: '2.0', id, result }))
           .catch(err => writeMessage({
             jsonrpc: '2.0',

@@ -1,96 +1,192 @@
-// baton done — Definition of Done calculator (v1.3 orchestrator core).
-// Answers one question mechanically: is this project complete?
-// A project is DONE when ALL of the following hold:
-//   1. every known task (ledger state or task file) has final status `done` (accepted)
-//   2. no escalated tasks await human review
-//   3. baton doctor reports zero structural errors
-//   4. zero unresolved claim conflicts
-// Exit 0 when done; exit 1 with the blocker list otherwise.
-import { readdir } from 'node:fs/promises';
+// v1.3.0 — baton done: the computable definition of "the work is complete".
+//
+// This is the orchestrator's terminal signal. Completion is not a feeling, it
+// is a checklist over the ledger and the repo:
+//
+//   G1. Every task file ends in status done (replayed from ledger).
+//       Draft/ready/assigned/in_review/needs_work/blocked/rejected = fail.
+//       A rejected task only passes if it carries a follow-up that is done.
+//   G2. Zero stale verified claims (stale --dry-run equivalent).
+//   G3. Zero unacknowledged conflicts (decision + claim conflicts).
+//   G4. doctor reports zero errors (structural integrity).
+//   G5. No decisions left in proposed state.
+//   G6. project-memory/STATE.md exists and is within the 60-line budget
+//       (warning-level in doctor; here it is a hard gate).
+//
+// Read-only: writes nothing to the ledger. Exit 0 = done, exit 1 = not done.
+// --json for the orchestrator to consume programmatically.
+
+import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
+import * as yaml from 'yaml';
 import { readLedger } from '../io/ledger-file.js';
 import { replay } from '../core/ledger-replay.js';
 import { doctor } from './doctor.js';
+import { stale } from './stale.js';
+import { conflicts } from './conflicts.js';
+
+export interface DoneGate {
+  id: string;
+  label: string;
+  pass: boolean;
+  detail: string;
+}
 
 export interface DoneResult {
   done: boolean;
-  pending: { id: string; title: string; status: string; escalated: boolean }[];
-  escalated: string[];
-  doctorErrors: { code: string; message: string }[];
-  claimConflicts: number;
+  gates: DoneGate[];
+}
+
+function parseFrontMatter(text: string): Record<string, unknown> {
+  const m = text.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!m) throw new Error('front matter not found');
+  return yaml.parse(m[1] ?? '') as Record<string, unknown>;
 }
 
 export async function done(repoRoot: string): Promise<DoneResult> {
+  const gates: DoneGate[] = [];
+
+  // ---- G1: all tasks done ----
   const { events } = await readLedger(repoRoot);
   const state = replay(events);
 
-  // Known tasks = union of ledger tasks and task files on disk
-  const known = new Set<string>(state.tasks.keys());
+  // Enumerate task files (a task that was never locked is still draft — fail).
+  let taskFiles: string[] = [];
   try {
-    const files = await readdir(path.join(repoRoot, 'project-memory/tasks'));
-    for (const f of files) {
-      if (/^T-\d{4}\.md$/.test(f)) known.add(f.replace(/\.md$/, ''));
-    }
-  } catch { /* no tasks dir — nothing pending from files */ }
+    taskFiles = (await readdir(path.join(repoRoot, 'project-memory/tasks'))).filter(f => f.endsWith('.md'));
+  } catch { taskFiles = []; }
 
-  const pending: { id: string; title: string; status: string; escalated: boolean }[] = [];
-  const escalated: string[] = [];
-  for (const id of Array.from(known).sort()) {
-    const t = state.tasks.get(id);
-    const status = t?.status ?? 'draft'; // task file exists but never locked
-    const isEscalated = t?.escalated ?? false;
-    if (isEscalated) escalated.push(id);
-    if (status !== 'done') {
-      pending.push({ id, title: '(see task file)', status, escalated: isEscalated });
+  const offenders: string[] = [];
+  for (const f of taskFiles) {
+    const taskId = f.replace(/\.md$/, '');
+    const t = state.tasks.get(taskId);
+    if (!t) {
+      offenders.push(`${taskId} (draft — never locked)`);
+      continue;
+    }
+    if (t.status === 'done') continue;
+    if (t.status === 'rejected' && t.followUpTask) {
+      const fu = state.tasks.get(t.followUpTask);
+      if (fu?.status === 'done') continue;
+      offenders.push(`${taskId} (rejected, follow-up ${t.followUpTask} not done${t.escalated ? ', ESCALATED' : ''})`);
+      continue;
+    }
+    offenders.push(`${taskId} (${t.status}${t.escalated ? ', ESCALATED' : ''})`);
+  }
+  // Tasks known only to the ledger but whose file was deleted also fail.
+  for (const [taskId, t] of state.tasks) {
+    if (!taskFiles.includes(`${taskId}.md`)) {
+      offenders.push(`${taskId} (${t.status}, task file missing)`);
     }
   }
+  gates.push({
+    id: 'G1',
+    label: 'All tasks done',
+    pass: offenders.length === 0 && taskFiles.length > 0,
+    detail: offenders.length === 0
+      ? `${taskFiles.length} task(s), all done`
+      : offenders.join('; '),
+  });
 
-  // Structural integrity
+  // ---- G2: zero stale claims (dry-run) ----
+  const staleResult = await stale(repoRoot, { dryRun: true });
+  gates.push({
+    id: 'G2',
+    label: 'Zero stale verified claims',
+    pass: staleResult.staleClaims.length === 0,
+    detail: `${staleResult.totalChecked} checked, ${staleResult.staleClaims.length} stale`,
+  });
+
+  // ---- G3: zero unacknowledged conflicts ----
+  const conflictResult = await conflicts(repoRoot, {});
+  const unresolved = [
+    ...conflictResult.decisionConflicts.filter(c => !c.acknowledged),
+    ...conflictResult.claimConflicts.filter(c => !c.acknowledged),
+  ];
+  gates.push({
+    id: 'G3',
+    label: 'Zero unacknowledged conflicts',
+    pass: unresolved.length === 0,
+    detail: unresolved.length === 0
+      ? 'no conflicts'
+      : unresolved.map(c => (c as { key: string }).key).join(', '),
+  });
+
+  // ---- G4: doctor clean (errors only) ----
   const doctorResult = await doctor(repoRoot);
-  const doctorErrors = doctorResult.findings
-    .filter(f => f.level === 'error')
-    .map(f => ({ code: f.code, message: f.message }));
+  const doctorErrors = doctorResult.findings.filter(f => f.level === 'error');
+  gates.push({
+    id: 'G4',
+    label: 'doctor reports no errors',
+    pass: !doctorResult.hasErrors,
+    detail: doctorErrors.length === 0
+      ? `${doctorResult.findings.filter(f => f.level === 'warning').length} warning(s)`
+      : doctorErrors.map(e => `${e.code}: ${e.message}`).join('; ').slice(0, 300),
+  });
 
-  // Claim conflicts
-  const { findConflicts } = await import('../core/ledger-replay.js');
-  const conflicts = findConflicts(events).claimConflicts.length;
+  // ---- G5: no proposed decisions ----
+  let decisionFiles: string[] = [];
+  try {
+    decisionFiles = (await readdir(path.join(repoRoot, 'project-memory/decisions'))).filter(f => f.endsWith('.md'));
+  } catch { decisionFiles = []; }
+  const proposed: string[] = [];
+  for (const f of decisionFiles) {
+    try {
+      const text = await readFile(path.join(repoRoot, 'project-memory/decisions', f), 'utf8');
+      const fm = parseFrontMatter(text);
+      if (fm.status === 'proposed') proposed.push(String(fm.id ?? f));
+    } catch { /* malformed handled by doctor */ }
+  }
+  gates.push({
+    id: 'G5',
+    label: 'No decisions left proposed',
+    pass: proposed.length === 0,
+    detail: proposed.length === 0 ? `${decisionFiles.length} decision(s) resolved` : proposed.join(', '),
+  });
 
-  const done = pending.length === 0 && doctorErrors.length === 0 && conflicts === 0;
-  return { done, pending, escalated, doctorErrors, claimConflicts: conflicts };
+  // ---- G6: STATE.md present and within budget ----
+  let stateMd = '';
+  try {
+    stateMd = await readFile(path.join(repoRoot, 'project-memory/STATE.md'), 'utf8');
+  } catch { /* missing */ }
+  const stateLines = stateMd ? stateMd.split('\n').length : 0;
+  gates.push({
+    id: 'G6',
+    label: 'STATE.md present and <= 60 lines',
+    pass: stateLines > 0 && stateLines <= 60,
+    detail: stateLines === 0 ? 'STATE.md missing' : `${stateLines} lines`,
+  });
+
+  // ---- G7 (v1.3 orchestrator): no escalated tasks awaiting human review ----
+  // A task rejected twice or more carries an `escalated` ledger event and is
+  // excluded from auto-dispatch until a human decides its fate.
+  const escalatedTasks: string[] = [];
+  for (const [taskId, t] of state.tasks) {
+    if (t.escalated) escalatedTasks.push(taskId);
+  }
+  gates.push({
+    id: 'G7',
+    label: 'No escalated tasks (2+ rejections) awaiting review',
+    pass: escalatedTasks.length === 0,
+    detail: escalatedTasks.length === 0
+      ? 'no escalated tasks'
+      : `${escalatedTasks.sort().join(', ')} — human decision required`,
+  });
+
+  return { done: gates.every(g => g.pass), gates };
 }
 
-export function formatDoneOutput(r: DoneResult): string {
-  if (r.done) {
-    return [
-      'PROJECT DONE.',
-      '',
-      'All tasks accepted, doctor clean, no unresolved claim conflicts.',
-      'Definition of done is satisfied mechanically, not by report.',
-    ].join('\n');
+export function formatDoneOutput(result: DoneResult): string {
+  const lines: string[] = [];
+  lines.push(result.done ? 'BATON: DONE' : 'BATON: NOT DONE');
+  lines.push('');
+  for (const g of result.gates) {
+    lines.push(`  [${g.pass ? 'PASS' : 'FAIL'}] ${g.id} ${g.label}`);
+    lines.push(`         ${g.detail}`);
   }
-
-  const lines: string[] = ['NOT DONE.', ''];
-
-  if (r.pending.length > 0) {
-    lines.push(`Pending tasks (${r.pending.length}):`);
-    for (const p of r.pending) {
-      const tag = p.escalated ? '  [ESCALATED]' : '';
-      lines.push(`  ${p.id}  ${p.status.padEnd(12)}${tag}`);
-    }
+  if (!result.done) {
     lines.push('');
+    lines.push('Complete the failing gates, then re-run baton done.');
   }
-  if (r.escalated.length > 0) {
-    lines.push(`Escalated (2+ rejections, needs human decision): ${r.escalated.join(', ')}`);
-    lines.push('');
-  }
-  if (r.doctorErrors.length > 0) {
-    lines.push(`Structural errors (${r.doctorErrors.length}):`);
-    for (const e of r.doctorErrors.slice(0, 8)) lines.push(`  ! ${e.code}: ${e.message}`);
-    lines.push('');
-  }
-  if (r.claimConflicts > 0) {
-    lines.push(`Unresolved claim conflicts: ${r.claimConflicts} (run: baton conflicts)`);
-    lines.push('');
-  }
-  return lines.join('\n').trimEnd();
+  return lines.join('\n');
 }

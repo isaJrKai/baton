@@ -72,7 +72,9 @@ Baton never merges. Accept records the verdict; merge through your normal PR pro
 | `baton log` | Ledger history |
 | `baton search <query>` | v1.3: BM25 retrieval over repo files (`--top`, `--glob`, `--json`). Without a query: filtered ledger search (`--task`, `--type`, `--last`, `--limit`, `--offset`) |
 | `baton next` | v1.3: deterministic scheduler — next eligible task (deps done, no area conflict with in-flight work) |
-| `baton done` | v1.3: Definition of Done gate — all tasks accepted, doctor clean, no unresolved claim conflicts. Exit 0 = mechanically done |
+| `baton lease take\|release\|list` | v1.3: exclusive area leases with TTL (`lease_acquired` / `lease_released` events; expiry recomputed by replay) |
+| `baton done` | v1.3: computable Definition of Done — 7 gates (G1 all tasks done, G2 zero stale claims, G3 zero unack conflicts, G4 doctor clean, G5 no proposed decisions, G6 STATE.md ≤ 60 lines, G7 no escalated tasks). Exit 0 only when all pass |
+| `baton gate` | v1.3: CI health gate (doctor + stale + conflicts + task flow); exit 7 on fail; `--init` writes the workflow |
 | `baton workers` | v1.3: worker reputation from report front matter + ledger outcomes (score = 10·accepted − 5·rejected − 1·verify_fails) |
 | `baton mcp` | MCP server on stdio (read-only tools; see below) |
 | `baton upgrade / migrate` | Reserved for v2 (exits 4) |
@@ -89,7 +91,7 @@ Any MCP client (Claude Desktop, Cursor, your own agent) can consume the project 
 }
 ```
 
-Tools: `list_tasks`, `get_task`, `get_packet`, `status`, `stale`, `conflicts`, `doctor`, `search_events`, plus v1.3: `search_files` (BM25 retrieval), `next_task` (scheduler), `project_done` (DoD gate), `list_workers` (reputation).
+Tools: `list_tasks`, `get_task`, `get_packet`, `status`, `stale`, `conflicts`, `doctor`, `search_events`, plus v1.3: `search_files` (BM25 retrieval), `next_task` (scheduler), `project_done` (DoD gates), `list_workers` (reputation), `lease_take` / `lease_list` / `lease_release` (dispatch), `gate` (CI health).
 
 Deliberately **read-only plus packet issuance** — `verify` executes untrusted worker code (guard G21) and stays on a human's terminal.
 
@@ -102,9 +104,31 @@ Packets now carry a **retrieved-context tier**: BM25 over the repo (k1 = 1.5, b 
 The orchestrator is deterministic tooling around the same ledger — no AI in the loop for scheduling or termination:
 
 - `baton next` — picks the oldest `ready` task whose dependencies are all `done` and whose `touches` don't overlap any in-flight (assigned / in_review / needs_work) task. Prints the queue and why the rest are blocked.
-- `baton reject` twice on a task → an `escalated` event is appended automatically; escalated tasks are listed by `baton done` and excluded from auto-dispatch until a human decides.
+- `baton lease take <T-id> --worker <name> [--ttl 120]` — exclusive dispatch rights over a task's touch areas. Overlapping active lease => exit 5. Leases survive restarts (expiry is recomputed from ledger timestamps) and use the same static-prefix overlap semantics as decisions.
+- `baton reject` twice on a task → an `escalated` event is appended automatically; escalated tasks are excluded from auto-dispatch until a human decides (`baton done` gate G7 reports them).
 - `baton workers` — reputation derived from evidence: report front matter (`worker:`) joined with ledger outcomes.
-- `baton done` — the mechanical Definition of Done: every task accepted, `doctor` clean, zero unresolved claim conflicts.
+- `baton done` — the computable Definition of Done. Seven gates, all mechanical:
+
+  - **G1** every task ends `done` (rejected tasks pass only via a done follow-up)
+  - **G2** zero stale verified claims
+  - **G3** zero unacknowledged conflicts
+  - **G4** `doctor` reports no errors
+  - **G5** no decisions left `proposed`
+  - **G6** `STATE.md` present and <= 60 lines
+  - **G7** no escalated tasks awaiting human review
+
+  `baton done` exits 0 only when all gates pass. This is the signal an orchestrator (human or machine) should act on — not a vibes check.
+- `baton gate` — CI-facing health gate (doctor + stale dry-run + conflicts + task flow). `baton gate --init` writes `.github/workflows/baton-gate.yml` so the repo self-instruments its own CI.
+
+## Stage history
+
+| Version | Stage | Contents |
+|---|---|---|
+| 1.0.x | 0 | manual trial run (T-0001 accepted; T-0002 rejected for scope creep; T-0003 rejected: worker claimed 6/6 tests, verify showed 2/6) |
+| 1.1.x | 1–2 | packets + verify with the 14 P0 fixes |
+| 1.2.0 | 3–4 | staleness, conflicts, status/log/doctor, worktree orphan GC |
+| 1.3.0 | 5 | **MCP server, CI gate (`baton gate`), BM25 retrieval tier, `baton search`, area leases, scheduler (`baton next`), reputation (`baton workers`), escalation, computable DoD (`baton done`)** |
+| next | 6+ | deterministic dispatch loop on top of leases; DAG ordering; merge queue |
 
 ## GitHub Action
 

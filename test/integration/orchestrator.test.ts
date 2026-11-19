@@ -221,12 +221,13 @@ describe('v1.3 orchestrator core', () => {
     // done should now be satisfied (only task, accepted; doctor clean)
     const d = runBaton(['done'], repoDir);
     expect(d.code).toBe(0);
-    expect(d.stdout).toContain('PROJECT DONE');
+    expect(d.stdout).toContain('BATON: DONE');
   });
 
-  it('done exits 0 on a fresh repo (no tasks at all)', () => {
+  it('done fails G1 on a fresh repo (no tasks defined, exit 1)', () => {
     const d = runBaton(['done'], repoDir);
-    expect(d.code).toBe(0);
-    expect(d.stdout).toContain('PROJECT DONE');
+    expect(d.code).toBe(1);
+    expect(d.stdout).toContain('BATON: NOT DONE');
+    expect(d.stdout).toContain('G1');
   });
 });

@@ -148,6 +148,6 @@ describe('v1.3 retrieval: packet retrieved-context tier', () => {
     const packetText = await readFile(path.join(repoDir, 'project-memory/packets/T-0001.md'), 'utf8');
     expect(packetText).toContain('Retrieved context');
     expect(packetText).toContain('src/ledger-engine.ts');
-    expect(packetText).toContain('score');
+    expect(packetText).toContain('bm25');
   });
 });

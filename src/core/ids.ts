@@ -20,7 +20,6 @@ export function nextId(existing: string[], prefix: string, pad = 4): string {
 export function hashBytes(bytes: Uint8Array): string {
   // Use Web Crypto (available in Node 20+ globally)
   // Avoid importing node:crypto to keep this function pure-testable.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const crypto = (globalThis as any).crypto;
   if (!crypto?.subtle) {
     throw new Error('Web Crypto not available. Requires Node 20+.');

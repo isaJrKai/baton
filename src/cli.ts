@@ -21,6 +21,8 @@ import { search, formatSearchResults, searchFiles, formatFileResults } from './c
 import { next, formatNextOutput } from './commands/next.js';
 import { done, formatDoneOutput } from './commands/done.js';
 import { workers, formatWorkersOutput } from './commands/workers.js';
+import { leaseTake, leaseRelease, leaseList, formatLeaseTable } from './commands/lease.js';
+import { gate, formatGateOutput, gateInit } from './commands/gate.js';
 import { runMcpServer } from './mcp/server.js';
 
 const program = new Command();
@@ -629,6 +631,85 @@ program
     } catch (err) {
       const e = err as Error & { exitCode?: number };
       console.error(`ERROR workers: ${e.message}`);
+      process.exit(e.exitCode ?? 1);
+    }
+  });
+
+// baton lease — v1.3 orchestrator: exclusive area leases with TTL
+const lease = program.command('lease');
+lease
+  .command('take <T-id>')
+  .requiredOption('--worker <name>', 'worker identity taking the lease')
+  .option('--ttl <minutes>', 'lease TTL in minutes (default 120)', parseInt)
+  .option('--allow-branch', 'allow running on non-base branch')
+  .action(async (tId: string, opts: { worker: string; ttl?: number; allowBranch?: boolean }) => {
+    try {
+      const result = await leaseTake(process.cwd(), tId, {
+        worker: opts.worker,
+        ttlMinutes: opts.ttl ?? 120,
+        allowBranch: opts.allowBranch,
+      });
+      console.log(`Lease taken: ${result.taskId} by ${result.worker} until ${result.expiresAt}`);
+      for (const a of result.areas) console.log(`  touches: ${a}`);
+    } catch (err) {
+      const e = err as Error & { exitCode?: number };
+      console.error(`ERROR lease take: ${e.message}`);
+      process.exit(e.exitCode ?? 1);
+    }
+  });
+
+lease
+  .command('release <T-id>')
+  .requiredOption('--reason <text>', 'why the lease is being released')
+  .option('--allow-branch', 'allow running on non-base branch')
+  .action(async (tId: string, opts: { reason: string; allowBranch?: boolean }) => {
+    try {
+      await leaseRelease(process.cwd(), tId, { reason: opts.reason, allowBranch: opts.allowBranch });
+      console.log(`Lease released: ${tId}`);
+    } catch (err) {
+      const e = err as Error & { exitCode?: number };
+      console.error(`ERROR lease release: ${e.message}`);
+      process.exit(e.exitCode ?? 1);
+    }
+  });
+
+lease
+  .command('list')
+  .description('show active (unexpired, unreleased) leases')
+  .action(async () => {
+    try {
+      const leases = await leaseList(process.cwd());
+      console.log(formatLeaseTable(leases));
+    } catch (err) {
+      const e = err as Error & { exitCode?: number };
+      console.error(`ERROR lease list: ${e.message}`);
+      process.exit(e.exitCode ?? 1);
+    }
+  });
+
+// baton gate — v1.3 CI health gate (Stage 5 Reach)
+program
+  .command('gate')
+  .description('CI health gate: doctor + stale + conflicts + task flow (exit 7 on fail)')
+  .option('--strict-done', 'also require baton done gates to pass')
+  .option('--init', 'write .github/workflows/baton-gate.yml (never overwrites)')
+  .option('--json', 'machine output')
+  .action(async (opts: { strictDone?: boolean; init?: boolean; json?: boolean }) => {
+    try {
+      if (opts.init) {
+        const result = await gateInit(process.cwd());
+        console.log(result.created
+          ? `Wrote ${result.path}. Baton now gates your CI.`
+          : `${result.path} already exists — left untouched.`);
+        return;
+      }
+      const result = await gate(process.cwd(), { strictDone: opts.strictDone });
+      if (opts.json) console.log(JSON.stringify(result, null, 2));
+      else console.log(formatGateOutput(result));
+      if (!result.pass) process.exit(7);
+    } catch (err) {
+      const e = err as Error & { exitCode?: number };
+      console.error(`ERROR gate: ${e.message}`);
       process.exit(e.exitCode ?? 1);
     }
   });

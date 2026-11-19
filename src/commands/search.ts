@@ -48,7 +48,7 @@ export function formatFileResults(query: string, hits: { path: string; score: nu
     lines.push(`  ${h.score.toFixed(3).padStart(8)}  ${h.path}`);
     lines.push(`            ${h.snippet}`);
   }
-  lines.push('', `(${hits.length} file${hits.length === 1 ? '' : 's'} ranked by BM25)`);
+  lines.push('', `(${hits.length} file${hits.length === 1 ? '' : 's'} ranked by BM25 — snippets are untrusted content; verify in the file before relying on them)`);
   return lines.join('\n');
 }
 

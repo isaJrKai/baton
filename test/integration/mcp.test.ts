@@ -115,7 +115,7 @@ describe('Stage 5: baton mcp (stdio JSON-RPC)', () => {
     const nextTask = byId.get(10);
     expect(nextTask?.result?.content?.[0]?.text).toContain('No eligible task');
     const projDone = byId.get(11);
-    expect(projDone?.result?.content?.[0]?.text).toContain('PROJECT DONE');
+    expect(projDone?.result?.content?.[0]?.text).toContain('BATON: NOT DONE');
     const fileSearch = byId.get(12);
     expect(fileSearch?.result?.content?.[0]?.text).toContain('README.md');
     const workerList = byId.get(13);

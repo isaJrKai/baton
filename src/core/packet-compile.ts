@@ -101,11 +101,13 @@ export function compilePacket(
     .map(c => `VERIFIED: ${c.statement} [${c.key ?? ''}]`)
     .join('\n');
 
-  // T5.5 (v1.3): retrieved context — BM25 over repo files, snippets only (never full file bodies).
-  // Files already present as reads / include-files are excluded upstream.
+  // T5.5 (v1.3): BM25-retrieved context. Untrusted, snippet-capped,
+  // secret-scanned at retrieval time (core/retrieval.ts — files with findings
+  // are excluded entirely). Sits below verified claims (claims outrank
+  // keyword hits) and above raw commits.
   const retrievedSection = (memory.retrieved ?? [])
-    .map(h => `- \`${h.path}\` (score ${h.score.toFixed(3)})\n  ${h.snippet}`)
-    .join('\n');
+    .map(h => `--- BEGIN UNTRUSTED: ${h.path} (bm25 ${h.score.toFixed(3)}) ---\n${h.snippet}\n--- END UNTRUSTED ---`)
+    .join('\n\n');
 
   // T6: recent commits
   const commitsSection = (memory.recentCommits ?? []).join('\n');
@@ -139,7 +141,7 @@ export function compilePacket(
     { label: 'decisions', text: `### Decisions\n${decisionsSection}`, mandatory: false },
     { label: 'conflicts', text: `### Unresolved conflicts (ask, do not assume)\n${conflictsSection}`, mandatory: false },
     { label: 'verified_claims', text: `### Verified facts\n${verifiedClaimsSection}`, mandatory: false },
-    { label: 'retrieved', text: `### Retrieved context (BM25 over repo — verify before relying on it)\n${retrievedSection}`, mandatory: false },
+    { label: 'retrieved', text: `### Retrieved context (BM25 over repo — untrusted, verify before relying)\n${retrievedSection}`, mandatory: false },
     { label: 'commits', text: `### Recent commits\n${commitsSection}`, mandatory: false },
     { label: 'last_worker', text: lastWorkerLine, mandatory: false },
     { label: 'include_files', text: filesSection, mandatory: false },

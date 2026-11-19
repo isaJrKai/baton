@@ -33,6 +33,13 @@ export interface ReplayState {
     hash?: string;             // P0-3
   }>;
   lastVerifyBase: Map<string, string>;  // taskId -> base_commit (P0-4)
+  leases: Map<string, {
+    worker: string;
+    areas: string[];
+    ttlMinutes: number;
+    acquiredAt: string;        // ISO ts of lease_acquired
+    releasedAt?: string;       // ISO ts of lease_released (if released)
+  }>;
 }
 
 export function replay(events: LedgerEvent[]): ReplayState {
@@ -41,6 +48,7 @@ export function replay(events: LedgerEvent[]): ReplayState {
     claims: new Map(),
     decisions: new Map(),
     lastVerifyBase: new Map(),
+    leases: new Map(),
   };
 
   // Track dedupe keys to skip duplicates per P0-5, P0-6
@@ -128,9 +136,38 @@ export function replay(events: LedgerEvent[]): ReplayState {
       d.status = e.to as 'proposed' | 'accepted' | 'rejected' | 'superseded';
       if (e.hash) d.hash = e.hash;  // P0-3
       state.decisions.set(e.decision, d);
+    } else if (e.type === 'lease_acquired') {
+      // Latest acquire per task wins (re-lease after expiry is legal).
+      state.leases.set(e.task, {
+        worker: e.worker,
+        areas: e.areas,
+        ttlMinutes: e.ttl_minutes,
+        acquiredAt: e.ts,
+      });
+    } else if (e.type === 'lease_released') {
+      const l = state.leases.get(e.task);
+      if (l && !l.releasedAt) l.releasedAt = e.ts;
     }
   }
   return state;
+}
+
+/**
+ * v1.3: active (not released, not expired) leases at a given time.
+ * Expiry = acquiredAt + ttlMinutes. Deterministic function of the ledger.
+ */
+export function activeLeases(
+  state: ReplayState,
+  nowMs: number = Date.now(),
+): { task: string; worker: string; areas: string[]; expiresAt: string }[] {
+  const out: { task: string; worker: string; areas: string[]; expiresAt: string }[] = [];
+  for (const [task, l] of state.leases) {
+    if (l.releasedAt) continue;
+    const expiresMs = Date.parse(l.acquiredAt) + l.ttlMinutes * 60_000;
+    if (Number.isNaN(expiresMs) || expiresMs <= nowMs) continue;
+    out.push({ task, worker: l.worker, areas: l.areas, expiresAt: new Date(expiresMs).toISOString() });
+  }
+  return out.sort((a, b) => a.task.localeCompare(b.task));
 }
 
 /**

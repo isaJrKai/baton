@@ -297,5 +297,20 @@ export const LedgerEventSchema = z.discriminatedUnion('type', [
     rejections: z.number().int().min(2),
     reason: z.string(),
   }),
+  // v1.3 orchestrator primitives: area leases. A lease claims exclusive
+  // dispatch rights over a task's touches areas for a TTL. Overlap is checked
+  // by the lease command at take-time; replay recomputes expiry from ts.
+  baseEvent.extend({
+    type: z.literal('lease_acquired'),
+    task: z.string().regex(/^T-\d{4}$/),
+    worker: z.string().min(1),
+    areas: z.array(z.string()).min(1),
+    ttl_minutes: z.number().int().positive(),
+  }),
+  baseEvent.extend({
+    type: z.literal('lease_released'),
+    task: z.string().regex(/^T-\d{4}$/),
+    reason: z.string(),
+  }),
 ]);
 export type LedgerEvent = z.infer<typeof LedgerEventSchema>;
