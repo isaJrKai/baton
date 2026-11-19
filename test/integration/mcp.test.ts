@@ -78,6 +78,11 @@ describe('Stage 5: baton mcp (stdio JSON-RPC)', () => {
     expect(names).toContain('conflicts');
     expect(names).toContain('doctor');
     expect(names).toContain('search_events');
+    // v1.3 orchestrator + retrieval tools
+    expect(names).toContain('search_files');
+    expect(names).toContain('next_task');
+    expect(names).toContain('project_done');
+    expect(names).toContain('list_workers');
     // verify must NOT be exposed: it executes untrusted worker code (G21)
     expect(names).not.toContain('verify');
   });
@@ -96,6 +101,25 @@ describe('Stage 5: baton mcp (stdio JSON-RPC)', () => {
     expect(tasks?.result?.content?.[0]?.text).toContain('No tasks found.');
     const search = byId.get(5);
     expect(search?.result?.content?.[0]?.text).toContain('total: 0');
+  });
+
+  it('v1.3 tools: next_task, project_done, search_files, list_workers respond', async () => {
+    const responses = await mcpExchange(repoDir, [
+      { jsonrpc: '2.0', id: 10, method: 'tools/call', params: { name: 'next_task', arguments: {} } },
+      { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'project_done', arguments: {} } },
+      { jsonrpc: '2.0', id: 12, method: 'tools/call', params: { name: 'search_files', arguments: { query: 'test readme' } } },
+      { jsonrpc: '2.0', id: 13, method: 'tools/call', params: { name: 'list_workers', arguments: {} } },
+    ]);
+    expect(responses.length).toBe(4);
+    const byId = new Map(responses.map(r => [r.id, r]));
+    const nextTask = byId.get(10);
+    expect(nextTask?.result?.content?.[0]?.text).toContain('No eligible task');
+    const projDone = byId.get(11);
+    expect(projDone?.result?.content?.[0]?.text).toContain('PROJECT DONE');
+    const fileSearch = byId.get(12);
+    expect(fileSearch?.result?.content?.[0]?.text).toContain('README.md');
+    const workerList = byId.get(13);
+    expect(workerList?.result?.content?.[0]?.text).toContain('No worker reputation');
   });
 
   it('returns -32601 for unknown methods and -32700 for malformed JSON', async () => {

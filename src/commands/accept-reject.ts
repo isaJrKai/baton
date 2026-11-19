@@ -143,6 +143,8 @@ export interface RejectResult {
   taskId: string;
   reason: string;
   followUpTaskId?: string;
+  rejections?: number;
+  escalated?: boolean;
 }
 
 export async function reject(
@@ -188,6 +190,12 @@ export async function reject(
       await writeFile(followUpPath, content, 'utf8');
     }
 
+    // v1.3 orchestrator: count prior rejections BEFORE appending, so the escalation
+    // event lands after the rejected event with an accurate count.
+    const { events } = await readLedger(repoRoot);
+    const priorRejections = events.filter(e => e.type === 'rejected' && e.task === taskId).length;
+    const totalRejections = priorRejections + 1;
+
     const eventId = await nextEventId(repoRoot);
     await appendLedger(repoRoot, {
       v: 1, id: eventId, ts: nowIso(),
@@ -197,6 +205,21 @@ export async function reject(
       follow_up_task: followUpTaskId,    // P0-11: string, not boolean
     });
 
-    return { taskId, reason: opts.reason, followUpTaskId };
+    // v1.3 orchestrator: 2nd (or later) rejection auto-escalates the task.
+    // The escalated event is a durable marker; replay exposes it as task.escalated.
+    let escalated = false;
+    if (totalRejections >= 2) {
+      escalated = true;
+      const escEventId = await nextEventId(repoRoot);
+      await appendLedger(repoRoot, {
+        v: 1, id: escEventId, ts: nowIso(),
+        type: 'escalated',
+        task: taskId,
+        rejections: totalRejections,
+        reason: opts.reason,
+      });
+    }
+
+    return { taskId, reason: opts.reason, followUpTaskId, rejections: totalRejections, escalated };
   });
 }

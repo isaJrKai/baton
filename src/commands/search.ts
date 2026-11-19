@@ -1,7 +1,57 @@
-// baton search — search the ledger. P1 (v1.2 §6): search [--task] [--type] [--last N] [--limit] [--offset].
-// Read-only: filters ledger events and prints them oldest-first (after pagination).
+// baton search — dual mode (v1.3):
+//   baton search <query>          → BM25 retrieval over repo files (retrieval engine)
+//   baton search [--task] [--type] [--last N] [--limit] [--offset]
+//                                 → ledger event filter (P1, v1.2 §6)
+// Both are read-only.
 import { readLedger } from '../io/ledger-file.js';
-import type { LedgerEvent } from '../core/schemas.js';
+import { retrieve, DEFAULT_TOP } from '../core/retrieval.js';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import * as yaml from 'yaml';
+import { PolicySchema, type Policy, type LedgerEvent } from '../core/schemas.js';
+
+async function loadPolicy(repoRoot: string): Promise<Policy> {
+  try {
+    const text = await readFile(path.join(repoRoot, '.baton/policy.yml'), 'utf8');
+    return PolicySchema.parse(yaml.parse(text));
+  } catch {
+    // No (or malformed) baton policy — retrieval still works with schema defaults.
+    // never_include + default secret patterns stay active; read-only, so safe.
+    return PolicySchema.parse({ baton_version: 1 });
+  }
+}
+
+export interface SearchFilesOpts {
+  top?: number;
+  globs?: string[];
+}
+
+export async function searchFiles(
+  repoRoot: string,
+  query: string,
+  opts: SearchFilesOpts = {},
+): Promise<{ hits: { path: string; score: number; snippet: string }[] }> {
+  const policy = await loadPolicy(repoRoot);
+  const hits = await retrieve(repoRoot, policy, query, {
+    top: opts.top ?? DEFAULT_TOP,
+    globs: opts.globs,
+  });
+  return { hits };
+}
+
+export function formatFileResults(query: string, hits: { path: string; score: number; snippet: string }[]): string {
+  if (hits.length === 0) {
+    return `No files match "${query}".`;
+  }
+  const lines = [`Query: "${query}"`, ''];
+  for (const h of hits) {
+    lines.push(`  ${h.score.toFixed(3).padStart(8)}  ${h.path}`);
+    lines.push(`            ${h.snippet}`);
+  }
+  lines.push('', `(${hits.length} file${hits.length === 1 ? '' : 's'} ranked by BM25)`);
+  return lines.join('\n');
+}
+
 
 export interface SearchOpts {
   task?: string;

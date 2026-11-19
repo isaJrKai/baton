@@ -17,14 +17,17 @@ import { status, formatStatusOutput, formatCiSummary } from './commands/status.j
 import { doctor, formatDoctorOutput } from './commands/doctor.js';
 import { logCommand } from './commands/log.js';
 import { statusHtml } from './commands/status-html.js';
-import { search, formatSearchResults } from './commands/search.js';
+import { search, formatSearchResults, searchFiles, formatFileResults } from './commands/search.js';
+import { next, formatNextOutput } from './commands/next.js';
+import { done, formatDoneOutput } from './commands/done.js';
+import { workers, formatWorkersOutput } from './commands/workers.js';
 import { runMcpServer } from './mcp/server.js';
 
 const program = new Command();
 program
   .name('baton')
   .description('Baton — repo-native continuity and verification kit for AI-assisted development')
-  .version('1.2.0');
+  .version('1.3.0');
 
 // v1.2 G8: on startup, clean up stale .baton/tmp/wt-* worktrees from killed verify runs.
 // NEVER touches sibling ../wt-* worker worktrees (G45).
@@ -400,6 +403,9 @@ program
     try {
       const result = await reject(process.cwd(), tId, opts);
       console.log(`Task ${result.taskId} rejected: ${result.reason}`);
+      if (result.rejections && result.rejections >= 2) {
+        console.log(`ESCALATED: ${result.rejections} rejections on this task — human review required (orchestrator will not auto-dispatch it).`);
+      }
       if (result.followUpTaskId) {
         console.log(`Follow-up task created: ${result.followUpTaskId}. Edit it, commit, then run: baton task ready ${result.followUpTaskId}`);
       }
@@ -513,21 +519,37 @@ program
     }
   });
 
-// baton search — P1 (v1.2 §6): ledger search with filters and pagination
+// baton search — v1.3 dual mode:
+//   baton search <query> → BM25 retrieval over repo files
+//   baton search --task T-0001 [--type ...] → ledger event filter (P1, v1.2 §6)
 program
-  .command('search')
-  .description('search ledger events (--task, --type, --last, --limit, --offset)')
-  .option('--task <T-id>', 'filter by task ID')
-  .option('--type <event-type>', 'filter by event type (e.g. claim, verify_run, rejected)')
+  .command('search [query]')
+  .description('search: free-text BM25 over repo files; with --task/--type filters the ledger instead')
+  .option('--task <T-id>', 'filter ledger events by task ID')
+  .option('--type <event-type>', 'filter ledger events by type (e.g. claim, verify_run, rejected)')
   .option('--last <n>', 'only the most recent N matches', parseInt)
   .option('--limit <n>', 'page size', parseInt)
   .option('--offset <n>', 'page offset', parseInt)
-  .option('--json', 'machine output (JSON lines)')
+  .option('--top <n>', 'max retrieval hits (default 8)', parseInt)
+  .option('--glob <globs>', 'restrict retrieval to comma-separated globs')
+  .option('--json', 'machine output (JSON lines / JSON array)')
   .option('--allow-branch', 'allow running on non-base branch')
-  .action(async (opts: { task?: string; type?: string; last?: number; limit?: number; offset?: number; json?: boolean; allowBranch?: boolean }) => {
+  .action(async (query: string | undefined, opts: { task?: string; type?: string; last?: number; limit?: number; offset?: number; top?: number; glob?: string; json?: boolean; allowBranch?: boolean }) => {
     try {
-      const { matches, total } = await search(process.cwd(), opts);
-      console.log(formatSearchResults(matches, total, opts.json));
+      if (query && query.trim().length > 0) {
+        const { hits } = await searchFiles(process.cwd(), query, {
+          top: opts.top,
+          globs: opts.glob ? opts.glob.split(',').map(s => s.trim()).filter(Boolean) : undefined,
+        });
+        if (opts.json) {
+          console.log(JSON.stringify(hits, null, 2));
+        } else {
+          console.log(formatFileResults(query, hits));
+        }
+      } else {
+        const { matches, total } = await search(process.cwd(), opts);
+        console.log(formatSearchResults(matches, total, opts.json));
+      }
     } catch (err) {
       const e = err as Error & { exitCode?: number };
       console.error(`ERROR search: ${e.message}`);
@@ -545,6 +567,68 @@ program
     } catch (err) {
       const e = err as Error & { exitCode?: number };
       console.error(`ERROR mcp: ${e.message}`);
+      process.exit(e.exitCode ?? 1);
+    }
+  });
+
+// baton next — v1.3 orchestrator core: deterministic scheduler
+program
+  .command('next')
+  .description('pick the next eligible task (deps done, no area conflict with in-flight work)')
+  .option('--json', 'machine output')
+  .action(async (opts: { json?: boolean }) => {
+    try {
+      const result = await next(process.cwd());
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(formatNextOutput(result));
+      }
+      if (!result.pick) process.exit(1);
+    } catch (err) {
+      const e = err as Error & { exitCode?: number };
+      console.error(`ERROR next: ${e.message}`);
+      process.exit(e.exitCode ?? 1);
+    }
+  });
+
+// baton done — v1.3 orchestrator core: Definition of Done calculator
+program
+  .command('done')
+  .description('check the Definition of Done: all tasks accepted, doctor clean, no conflicts')
+  .option('--json', 'machine output')
+  .action(async (opts: { json?: boolean }) => {
+    try {
+      const result = await done(process.cwd());
+      if (opts.json) {
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        console.log(formatDoneOutput(result));
+      }
+      if (!result.done) process.exit(1);
+    } catch (err) {
+      const e = err as Error & { exitCode?: number };
+      console.error(`ERROR done: ${e.message}`);
+      process.exit(e.exitCode ?? 1);
+    }
+  });
+
+// baton workers — v1.3 orchestrator core: worker reputation from reports + ledger
+program
+  .command('workers')
+  .description('worker reputation table (accepted/rejected/verify failures per worker)')
+  .option('--json', 'machine output')
+  .action(async (opts: { json?: boolean }) => {
+    try {
+      const { workers: list } = await workers(process.cwd());
+      if (opts.json) {
+        console.log(JSON.stringify(list, null, 2));
+      } else {
+        console.log(formatWorkersOutput(list));
+      }
+    } catch (err) {
+      const e = err as Error & { exitCode?: number };
+      console.error(`ERROR workers: ${e.message}`);
       process.exit(e.exitCode ?? 1);
     }
   });

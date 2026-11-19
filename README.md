@@ -69,7 +69,11 @@ Baton never merges. Accept records the verdict; merge through your normal PR pro
 | `baton conflicts` | Decision and claim conflicts (`--ack` / `--unack`) |
 | `baton status` | Summary; `--html` single-file page; `--ci` Markdown table for PR comments |
 | `baton doctor` | Structural integrity: ledger, hashes, duplicates, orphan worktrees |
-| `baton log / search` | Ledger history and filtered search (`--task`, `--type`, `--last`, `--limit`, `--offset`) |
+| `baton log` | Ledger history |
+| `baton search <query>` | v1.3: BM25 retrieval over repo files (`--top`, `--glob`, `--json`). Without a query: filtered ledger search (`--task`, `--type`, `--last`, `--limit`, `--offset`) |
+| `baton next` | v1.3: deterministic scheduler — next eligible task (deps done, no area conflict with in-flight work) |
+| `baton done` | v1.3: Definition of Done gate — all tasks accepted, doctor clean, no unresolved claim conflicts. Exit 0 = mechanically done |
+| `baton workers` | v1.3: worker reputation from report front matter + ledger outcomes (score = 10·accepted − 5·rejected − 1·verify_fails) |
 | `baton mcp` | MCP server on stdio (read-only tools; see below) |
 | `baton upgrade / migrate` | Reserved for v2 (exits 4) |
 
@@ -85,9 +89,22 @@ Any MCP client (Claude Desktop, Cursor, your own agent) can consume the project 
 }
 ```
 
-Tools: `list_tasks`, `get_task`, `get_packet`, `status`, `stale`, `conflicts`, `doctor`, `search_events`.
+Tools: `list_tasks`, `get_task`, `get_packet`, `status`, `stale`, `conflicts`, `doctor`, `search_events`, plus v1.3: `search_files` (BM25 retrieval), `next_task` (scheduler), `project_done` (DoD gate), `list_workers` (reputation).
 
 Deliberately **read-only plus packet issuance** — `verify` executes untrusted worker code (guard G21) and stays on a human's terminal.
+
+## Retrieval (v1.3)
+
+Packets now carry a **retrieved-context tier**: BM25 over the repo (k1 = 1.5, b = 0.75) ranks files against the task title + touches and adds scored one-line snippets. Same security bar as packet file inclusion — `never_include` globs and per-file secret scans apply, files already present as `reads` are excluded, and `retrieval_snippets: 0` in `.baton/policy.yml` disables the tier. `baton search "query"` exposes the same engine on the CLI. Deterministic, no AI call, no network.
+
+## Orchestrator core (v1.3)
+
+The orchestrator is deterministic tooling around the same ledger — no AI in the loop for scheduling or termination:
+
+- `baton next` — picks the oldest `ready` task whose dependencies are all `done` and whose `touches` don't overlap any in-flight (assigned / in_review / needs_work) task. Prints the queue and why the rest are blocked.
+- `baton reject` twice on a task → an `escalated` event is appended automatically; escalated tasks are listed by `baton done` and excluded from auto-dispatch until a human decides.
+- `baton workers` — reputation derived from evidence: report front matter (`worker:`) joined with ledger outcomes.
+- `baton done` — the mechanical Definition of Done: every task accepted, `doctor` clean, zero unresolved claim conflicts.
 
 ## GitHub Action
 
@@ -140,7 +157,7 @@ npm test              # typecheck + vitest (integration tests build real git rep
 npm run guard:network # G24: no network imports in src/
 ```
 
-Status: Stage 1 (Packets), Stage 2 (Verify), Stage 3 (Freshness), Stage 4 (View), Stage 5 (Reach: MCP + GitHub Action) implemented. Node >= 20.
+Status: Stage 1 (Packets), Stage 2 (Verify), Stage 3 (Freshness), Stage 4 (View), Stage 5 (Reach: MCP + GitHub Action) implemented; v1.3 adds the retrieval tier and the orchestrator core (scheduler, escalation, reputation, DoD gate). Node >= 20.
 
 ## License
 

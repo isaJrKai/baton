@@ -17,6 +17,8 @@ export interface ReplayState {
     priorStatus?: TaskStatus;  // for blocked -> unblocked
     latestVerifyHead?: string;
     followUpTask?: string;     // P0-11
+    escalated?: boolean;       // v1.3: 2+ rejections
+    rejectCount?: number;      // v1.3: total rejections seen
   }>;
   claims: Map<string, {
     taskId: string;
@@ -101,8 +103,13 @@ export function replay(events: LedgerEvent[]): ReplayState {
       const t = state.tasks.get(e.task);
       if (t) {
         t.status = 'rejected';
+        t.rejectCount = (t.rejectCount ?? 0) + 1;  // v1.3
         if (e.follow_up_task) t.followUpTask = e.follow_up_task;  // P0-11
       }
+    } else if (e.type === 'escalated') {
+      // v1.3: orchestrator escalation marker (2+ rejections)
+      const t = state.tasks.get(e.task);
+      if (t) t.escalated = true;
     } else if (e.type === 'blocked') {
       // P0-2: prior_status stored on event
       const t = state.tasks.get(e.task);

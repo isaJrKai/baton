@@ -13,6 +13,7 @@ import { getCommitSha, fileExistsAtRef, readFileAtRef, lsFilesAtRef } from '../i
 import { replay } from '../core/ledger-replay.js';
 import { overlaps, isMatch } from '../core/globs.js';
 import { scan } from '../core/secrets.js';
+import { retrieve } from '../core/retrieval.js';
 import { assertOnBaseBranch } from '../io/branch-guard.js';
 
 function nowIso(): string {
@@ -201,6 +202,24 @@ export async function packet(
     }
   }
 
+  // Retrieved context (v1.3): BM25 over repo files. Query is derived from the task
+  // title + touches (deterministic — no AI call). Files already given as reads are
+  // excluded so the tier surfaces NEW context. never_include + secret scan apply
+  // inside retrieve(); retrieval_snippets: 0 disables the tier.
+  const retrievalCount = policy.retrieval_snippets ?? 6;
+  let retrieved: { path: string; score: number; snippet: string }[] = [];
+  if (retrievalCount > 0 && (task.title ?? '').length > 0) {
+    const readSet = new Set((task.reads ?? []).map(r => r.replace(/\\/g, '/')));
+    const query = [task.title, ...task.touches].join(' ');
+    try {
+      const hits = await retrieve(repoRoot, policy, query, { top: retrievalCount, excludePaths: readSet });
+      retrieved = hits;
+    } catch {
+      // retrieval is best-effort: never block packet issuance
+      retrieved = [];
+    }
+  }
+
   // Compile
   const result = compilePacket(task, {
     baseSha,
@@ -211,6 +230,7 @@ export async function packet(
     decisions: decisionsWithBodies,    // T3: accepted decision bodies
     conflicts: [],
     verifiedClaims,
+    retrieved,
     recentCommits,
     lastWorkerOnArea: lastWorker,
   }, budget, {

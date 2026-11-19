@@ -170,6 +170,8 @@ export const PolicySchema = z.object({
     name: z.string(),
     regex: z.string(),
   })).default([]),
+  // v1.3: retrieved-context tier size in packets. 0 disables the tier.
+  retrieval_snippets: z.number().int().min(0).max(20).default(6),
 }).strict();
 export type Policy = z.infer<typeof PolicySchema>;
 
@@ -286,6 +288,14 @@ export const LedgerEventSchema = z.discriminatedUnion('type', [
     type: z.literal('conflict_ack'),
     key: z.string(),
     note: z.string(),
+  }),
+  baseEvent.extend({
+    // v1.3 orchestrator: a task rejected N times (N >= 2) is escalated for human review.
+    // Written automatically by `baton reject` when this is the second (or later) rejection.
+    type: z.literal('escalated'),
+    task: z.string().regex(/^T-\d{4}$/),
+    rejections: z.number().int().min(2),
+    reason: z.string(),
   }),
 ]);
 export type LedgerEvent = z.infer<typeof LedgerEventSchema>;

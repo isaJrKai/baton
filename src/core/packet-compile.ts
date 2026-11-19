@@ -16,6 +16,7 @@ export interface PacketMemory {
   decisions?: (Decision & { body?: string })[];
   conflicts?: { key: string; text: string }[];
   verifiedClaims?: { claim_id: string; statement: string; key?: string; watch?: string[] }[];
+  retrieved?: { path: string; score: number; snippet: string }[];
   recentCommits?: string[];
   reportTemplate?: string;
   lastWorkerOnArea?: { taskId: string; title: string; head_commit: string; status: string } | null;
@@ -100,6 +101,12 @@ export function compilePacket(
     .map(c => `VERIFIED: ${c.statement} [${c.key ?? ''}]`)
     .join('\n');
 
+  // T5.5 (v1.3): retrieved context — BM25 over repo files, snippets only (never full file bodies).
+  // Files already present as reads / include-files are excluded upstream.
+  const retrievedSection = (memory.retrieved ?? [])
+    .map(h => `- \`${h.path}\` (score ${h.score.toFixed(3)})\n  ${h.snippet}`)
+    .join('\n');
+
   // T6: recent commits
   const commitsSection = (memory.recentCommits ?? []).join('\n');
 
@@ -132,6 +139,7 @@ export function compilePacket(
     { label: 'decisions', text: `### Decisions\n${decisionsSection}`, mandatory: false },
     { label: 'conflicts', text: `### Unresolved conflicts (ask, do not assume)\n${conflictsSection}`, mandatory: false },
     { label: 'verified_claims', text: `### Verified facts\n${verifiedClaimsSection}`, mandatory: false },
+    { label: 'retrieved', text: `### Retrieved context (BM25 over repo — verify before relying on it)\n${retrievedSection}`, mandatory: false },
     { label: 'commits', text: `### Recent commits\n${commitsSection}`, mandatory: false },
     { label: 'last_worker', text: lastWorkerLine, mandatory: false },
     { label: 'include_files', text: filesSection, mandatory: false },

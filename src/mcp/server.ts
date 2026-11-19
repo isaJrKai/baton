@@ -13,11 +13,14 @@ import { status, formatStatusOutput } from '../commands/status.js';
 import { stale, formatStaleTable } from '../commands/stale.js';
 import { conflicts, formatConflictsTable } from '../commands/conflicts.js';
 import { doctor, formatDoctorOutput } from '../commands/doctor.js';
-import { search } from '../commands/search.js';
+import { search, searchFiles } from '../commands/search.js';
+import { next } from '../commands/next.js';
+import { done } from '../commands/done.js';
+import { workers } from '../commands/workers.js';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-const SERVER_VERSION = '1.2.0';
+const SERVER_VERSION = '1.3.0';
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 
 interface JsonRpcRequest {
@@ -144,6 +147,67 @@ const TOOLS: ToolDef[] = [
       });
       const body = matches.map(e => JSON.stringify(e)).join('\n');
       return `total: ${total}\n${body}`;
+    },
+  },
+  {
+    name: 'search_files',
+    description: 'BM25 keyword retrieval over repo files (never_include + secret-scan respected). Returns ranked paths with scores and one-line snippets.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'free-text query' },
+        top: { type: 'number', description: 'max hits (default 8)' },
+      },
+      required: ['query'],
+    },
+    handler: async (args, repoRoot) => {
+      const { hits } = await searchFiles(repoRoot, String(args.query), {
+        top: typeof args.top === 'number' ? args.top : undefined,
+      });
+      if (hits.length === 0) return 'No files match the query.';
+      return hits.map(h => `${h.score.toFixed(3)}  ${h.path}\n          ${h.snippet}`).join('\n');
+    },
+  },
+  {
+    name: 'next_task',
+    description: 'Deterministic scheduler: the next eligible task (dependencies done, touches do not overlap any in-flight task). Returns pick + queue + blockers.',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async (_args, repoRoot) => {
+      const r = await next(repoRoot);
+      if (!r.pick) {
+        const reasons = [
+          r.inFlight.length > 0 ? `in flight: ${r.inFlight.map(f => f.id).join(', ')}` : '',
+          r.blockedByDeps.length > 0 ? `waiting on deps: ${r.blockedByDeps.map(b => `${b.id}(needs ${b.unmet.join(',')})`).join(', ')}` : '',
+          r.blockedByConflict.length > 0 ? `area conflicts: ${r.blockedByConflict.map(b => b.id).join(', ')}` : '',
+        ].filter(Boolean).join('; ');
+        return reasons ? `No eligible task right now. ${reasons}` : 'No eligible task right now. No tasks are ready — run: baton task ready <T-id>';
+      }
+      return `NEXT: ${r.pick.id}  ${r.pick.title}\ntouches: ${r.pick.touches.join(', ')}\n\nIssue packet: baton packet ${r.pick.id}`;
+    },
+  },
+  {
+    name: 'project_done',
+    description: 'Definition of Done check: reports whether all tasks are accepted, doctor is clean, and no claim conflicts remain. Read-only.',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async (_args, repoRoot) => {
+      const r = await done(repoRoot);
+      if (r.done) return 'PROJECT DONE. All tasks accepted, doctor clean, no conflicts.';
+      const lines = ['NOT DONE.'];
+      if (r.pending.length > 0) lines.push(`pending: ${r.pending.map(p => `${p.id}(${p.status}${p.escalated ? ',escalated' : ''})`).join(', ')}`);
+      if (r.escalated.length > 0) lines.push(`escalated: ${r.escalated.join(', ')}`);
+      if (r.doctorErrors.length > 0) lines.push(`doctor errors: ${r.doctorErrors.map(e => e.code).join(', ')}`);
+      if (r.claimConflicts > 0) lines.push(`claim conflicts: ${r.claimConflicts}`);
+      return lines.join('\n');
+    },
+  },
+  {
+    name: 'list_workers',
+    description: 'Worker reputation table derived from report front matter (worker:) joined with ledger outcomes (accepted/rejected/verify failures).',
+    inputSchema: { type: 'object', properties: {} },
+    handler: async (_args, repoRoot) => {
+      const { workers: list } = await workers(repoRoot);
+      if (list.length === 0) return 'No worker reputation yet (no reports with worker: front matter).';
+      return list.map(w => `${w.worker}: score ${w.score} (accepted ${w.accepted}, rejected ${w.rejected}, verify_fails ${w.verifyFailures})`).join('\n');
     },
   },
 ];
