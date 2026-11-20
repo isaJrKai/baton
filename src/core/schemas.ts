@@ -294,6 +294,11 @@ export const LedgerEventSchema = z.discriminatedUnion('type', [
     task: z.string().regex(/^T-\d{4}$/),
     commit: z.string(),
     override: z.string().nullable().optional(),
+    // v1.3.3: recorded when --allow-moved accepted a task whose worker branch
+    // moved after verify. commit stays bound to the VERIFIED head; branch_tip
+    // is where the branch actually was at accept time.
+    branch_moved: z.boolean().optional(),
+    branch_tip: z.string().optional(),
   }),
   baseEvent.extend({
     type: z.literal('rejected'),

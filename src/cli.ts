@@ -383,11 +383,15 @@ program
 program
   .command('accept <T-id>')
   .option('--override <reason>', 'override from needs_work with a reason')
+  .option('--allow-moved', 'accept the verified commit even if the worker branch moved after verify (records branch_moved in the ledger)')
   .option('--allow-branch', 'allow running on non-base branch')
-  .action(async (tId: string, opts: { override?: string; allowBranch?: boolean }) => {
+  .action(async (tId: string, opts: { override?: string; allowBranch?: boolean; allowMoved?: boolean }) => {
     try {
       const result = await accept(process.cwd(), tId, opts);
       console.log(`Task ${result.taskId} accepted at commit ${result.commit.slice(0, 12)}.`);
+      if (result.branchMoved) {
+        console.log(`  Note: worker branch moved after verify — the verified commit was accepted (--allow-moved); commits after it were NOT checked.`);
+      }
       if (result.override) console.log(`  Override: ${result.override}`);
       console.log('Baton does not merge. Merge through your normal PR process.');
     } catch (err) {

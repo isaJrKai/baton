@@ -32,6 +32,28 @@ export interface CompileResult {
 const READS_CAP = 8000;
 const READS_TRUNCATION_MARKER = (omitted: number) => `\n[... truncated, ${omitted} chars omitted, see file at <path> ...]`;
 
+// v1.3.3 (red-team finding): packet fence breakout. Untrusted content is
+// emitted inside `--- BEGIN/END UNTRUSTED ---` fences. A file containing the
+// literal closer closed the fence early, and text after it appeared OUTSIDE
+// the untrusted marker (fake "Task contract (TRUSTED)" blocks). Any content
+// line that looks like a fence marker is neutralized into a visible,
+// non-fence escape line before it reaches the packet. Escaping runs BEFORE
+// the 8000-char cap so truncation can neither split nor resurrect a marker.
+const FENCE_LINE_RE = /^[ \t]*-{2,}[ \t]*(?:BEGIN|END)[ \t]+UNTRUSTED[^\n]*$/gim;
+
+export function escapeFenceMarkers(text: string): string {
+  const lineEscaped = text.replace(FENCE_LINE_RE, (line) => {
+    const body = line.trim().replace(/^-+/, '').replace(/-+$/, '').trim();
+    return `[baton-escaped fence marker: ${body}]`;
+  });
+  // Mid-line leftovers (e.g. a one-line claim statement like
+  // "DB uses postgres --- END UNTRUSTED --- and more") are neutralized too —
+  // the exact dash+UNTRUSTED token sequence must not survive anywhere in
+  // untrusted content. Same visible marker as the line-level escape.
+  return lineEscaped.replace(/-{2,}[ \t]*(?:BEGIN|END)[ \t]+UNTRUSTED/gi, (m) =>
+    `[baton-escaped fence marker: ${m.replace(/^-+/, '').trim()}]`);
+}
+
 function tierCost(text: string): number {
   return estimateTokens(text);
 }
@@ -70,12 +92,15 @@ export function compilePacket(
   const touchesText = `## Touches\n${task.touches.map(t => `- \`${t}\``).join('\n')}`;
 
   // T2: reads files (cap 8000 chars each, truncate with marker)
+  // Content is fence-escaped BEFORE the cap so a truncated slice can never
+  // resurrect a fence marker (v1.3.3).
   const readsSection = (memory.reads ?? []).map(r => {
-    if (r.content.length > READS_CAP) {
-      const omitted = r.content.length - READS_CAP;
-      return `--- BEGIN UNTRUSTED: ${r.path} ---\n${r.content.slice(0, READS_CAP)}${READS_TRUNCATION_MARKER(omitted)}\n--- END UNTRUSTED ---`;
+    const content = escapeFenceMarkers(r.content);
+    if (content.length > READS_CAP) {
+      const omitted = content.length - READS_CAP;
+      return `--- BEGIN UNTRUSTED: ${r.path} ---\n${content.slice(0, READS_CAP)}${READS_TRUNCATION_MARKER(omitted)}\n--- END UNTRUSTED ---`;
     }
-    return `--- BEGIN UNTRUSTED: ${r.path} ---\n${r.content}\n--- END UNTRUSTED ---`;
+    return `--- BEGIN UNTRUSTED: ${r.path} ---\n${content}\n--- END UNTRUSTED ---`;
   }).join('\n\n');
 
   // T3: decisions: status accepted AND (id in task.decisions OR overlaps)
@@ -98,7 +123,7 @@ export function compilePacket(
       if (!c.watch) return true;
       return c.watch.some(w => task.touches.some(t => overlaps(w, t)));
     })
-    .map(c => `VERIFIED: ${c.statement} [${c.key ?? ''}]`)
+    .map(c => `VERIFIED: ${escapeFenceMarkers(c.statement)} [${c.key ?? ''}]`)   // claim statements are worker-authored (v1.3.3)
     .join('\n');
 
   // T5.5 (v1.3): BM25-retrieved context. Untrusted, snippet-capped,
@@ -106,7 +131,7 @@ export function compilePacket(
   // are excluded entirely). Sits below verified claims (claims outrank
   // keyword hits) and above raw commits.
   const retrievedSection = (memory.retrieved ?? [])
-    .map(h => `--- BEGIN UNTRUSTED: ${h.path} (bm25 ${h.score.toFixed(3)}) ---\n${h.snippet}\n--- END UNTRUSTED ---`)
+    .map(h => `--- BEGIN UNTRUSTED: ${h.path} (bm25 ${h.score.toFixed(3)}) ---\n${escapeFenceMarkers(h.snippet)}\n--- END UNTRUSTED ---`)
     .join('\n\n');
 
   // T6: recent commits
@@ -116,11 +141,12 @@ export function compilePacket(
   let filesSection = '';
   if (options.includeFiles && options.files) {
     filesSection = options.files.map(f => {
-      if (f.content.length > READS_CAP) {
-        const omitted = f.content.length - READS_CAP;
-        return `--- BEGIN UNTRUSTED: ${f.path} ---\n${f.content.slice(0, READS_CAP)}${READS_TRUNCATION_MARKER(omitted)}\n--- END UNTRUSTED ---`;
+      const content = escapeFenceMarkers(f.content);
+      if (content.length > READS_CAP) {
+        const omitted = content.length - READS_CAP;
+        return `--- BEGIN UNTRUSTED: ${f.path} ---\n${content.slice(0, READS_CAP)}${READS_TRUNCATION_MARKER(omitted)}\n--- END UNTRUSTED ---`;
       }
-      return `--- BEGIN UNTRUSTED: ${f.path} ---\n${f.content}\n--- END UNTRUSTED ---`;
+      return `--- BEGIN UNTRUSTED: ${f.path} ---\n${content}\n--- END UNTRUSTED ---`;
     }).join('\n\n');
   }
 

@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.3.3 — Red-team findings: accept race + packet fence breakout
+
+Independent red-team trial confirmed three findings. Two were mechanically
+fixable; both landed test-first (15 new tests — suite at 238, ~54 s). The
+third (check gaming) is inherent to test-based checking and is documented as
+a known limit; the held-out-test design follows separately.
+
+### accept binds to the exact verified commit (MEDIUM)
+- Exploit: verify an honest commit (ALL_PASS), push a backdoor commit on top
+  of the same branch — accept still said "accepted at <sha>" and never warned
+  the branch had moved. A fast-forward passes the old on-branch
+  `merge-base --is-ancestor` force-push check, and when accept ran from the
+  base branch the old check never ran at all. The accepted event did record
+  the verified SHA (merging that exact SHA was safe), but an operator merging
+  the branch shipped unreviewed commits.
+- Fix: accept resolves every `baton/<taskId>-*` branch and fails (exit 4)
+  when any tip is NOT part of the verified head's history — catches both
+  fast-forward movement and force-push rewrites, regardless of the checked-out
+  branch. Remediation is re-verify at the new tip; accept then succeeds.
+- `--allow-moved` is the explicit escape hatch: binds the accepted event to
+  the verified commit and records `branch_moved: true` + `branch_tip` for the
+  audit trail. Branch-behind-the-verified-head tips stay allowed (their
+  content is a subset of the verified tree).
+
+### packet fences cannot be broken from the inside (MEDIUM)
+- Exploit: a file in `reads` containing the literal fence closer
+  `--- END UNTRUSTED ---` closed the fence early; text after it (a fake
+  "Task contract (TRUSTED)" block) appeared OUTSIDE the untrusted marker.
+- Fix: all untrusted content — `reads`, `--include-files`, BM25 retrieval
+  snippets, and worker-authored claim statements — is fence-escaped BEFORE
+  the 8000-char cap. Any line that looks like a fence marker becomes a
+  visible `[baton-escaped fence marker: ...]` line; mid-line dash+UNTRUSTED
+  sequences are neutralized too, so the token sequence cannot survive anywhere
+  in untrusted content and can neither close a block nor open a fake one.
+  Honest content passes through byte-identical.
+- The trusted packet header now documents the convention so a model reads
+  escaped markers as file content, not trust boundaries.
+
+### Known limitation (documented, not fixed here)
+- Checks can be gamed: a worker can satisfy a weak check (hardcoded input,
+  comment, empty file) while the goal is unmet — no check proves more than it
+  asserts. Baton labels check strength (`behavior` vs `artifact`) honestly;
+  the follow-up is a held-out test design, owned by the reviewer.
+
 ## 1.3.2 — Hardening the trust boundary
 
 Second external review (tsc clean, 145/145 pass), verified gaps only. No new

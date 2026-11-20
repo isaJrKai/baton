@@ -184,12 +184,27 @@ Baton runs on your machine, so it is honest about what runs there:
 - **Recommendation:** treat local `baton verify` as convenience, not security.
   Put the verify gate in CI on an ephemeral runner (see the GitHub Action
   below) — that is the environment where untrusted code execution belongs.
+- **Known limit:** checks decide only what they assert. A weak check can be
+  satisfied without the goal being met (a hardcoded input, a comment, an empty
+  file). Baton labels every check's strength (`behavior` vs `artifact`) so
+  weak-only tasks are visible; it cannot prove more than the checks say.
+
 ## Security model
 
 - All git access goes through one wrapper allowlisting read-only subcommands plus `worktree add --detach / remove / list`; `git config` is explicitly forbidden (G6/G7).
 - Verification runs only in temporary detached worktrees under `.baton/tmp/`, never your working directory (G8). Orphaned worktrees from killed runs are cleaned by PID on startup.
 - Workers are judged by the locked tests: `protected_paths` (test globs by default) are restored from the merge-base before checks run, and a worker's edit to them fails `protected_paths` unless the task was created with `--allow-protected`.
 - Worker code execution is explicit: `cmd` checks require an allowlisted command and `--yes` acknowledgment (G21).
+- `accept` binds to the exact verified commit: if the worker branch moved after
+  verify (a commit pushed on top, or a rewrite), accept refuses with a
+  re-verify hint — no matter which branch you run it from. `--allow-moved`
+  accepts the verified commit only and records `branch_moved` + `branch_tip`
+  in the ledger (v1.3.3, red-team finding).
+- Packet fences cannot be broken from the inside: untrusted content (reads,
+  `--include-files`, BM25 snippets, worker claim statements) containing fence
+  markers is escaped into visible `[baton-escaped fence marker: ...]` lines,
+  so text can never escape an UNTRUSTED block or forge a trusted section
+  (v1.3.3, red-team finding).
 - Secrets are scanned from diffs with pattern masking; credential files (`**/.npmrc`, `**/.aws/credentials`, …) are excluded from packet inclusion by `never_include`.
 - Packets separate the trusted header from untrusted context — injection through task text cannot alter the contract.
 

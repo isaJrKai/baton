@@ -48,12 +48,13 @@ export interface AcceptResult {
   taskId: string;
   commit: string;
   override?: string;
+  branchMoved?: boolean;   // v1.3.3: true when accepted with --allow-moved after branch movement
 }
 
 export async function accept(
   repoRoot: string,
   taskId: string,
-  opts: { override?: string; allowBranch?: boolean } = {},
+  opts: { override?: string; allowBranch?: boolean; allowMoved?: boolean } = {},
 ): Promise<AcceptResult> {
   // Load default branch from policy
   let baseBranch = 'main';
@@ -101,10 +102,58 @@ export async function accept(
     // For Stage 2 we accept the latest verify_run head as the current tip
     let commit = t.latestVerifyHead;
 
+    // v1.3.3 (red-team finding, MEDIUM): verify-then-accept race. The verified
+    // SHA is what accept binds to, but the worker branch may have moved after
+    // verify. A plain fast-forward (new commits on top of the verified head)
+    // passed the old on-branch is-ancestor force-push check — and when accept
+    // ran from the base branch, the old check never ran at all, so accept said
+    // "accepted at <sha>" while the branch tip carried unreviewed commits.
+    // Fix: resolve every baton/<taskId>-* branch and fail closed when any tip
+    // is NOT part of the verified head's history. --allow-moved is the explicit
+    // escape hatch: it binds the accepted event to the verified commit and
+    // records branch_moved + branch_tip for the audit trail.
+    let branchMoved = false;
+    let movedTip: string | null = null;
+    try {
+      const listR = await git(['for-each-ref', '--format=%(refname:short)', 'refs/heads/baton/'], { cwd: repoRoot });
+      if (listR.exitCode === 0) {
+        const prefix = `baton/${taskId}-`;
+        const branches = listR.stdout.split('\n').map(b => b.trim()).filter(b => b.startsWith(prefix));
+        for (const br of branches) {
+          const tipR = await git(['rev-parse', '--verify', `${br}^{commit}`], { cwd: repoRoot });
+          if (tipR.exitCode !== 0) continue;
+          const tip = tipR.stdout.trim();
+          if (tip === commit) continue;
+          // Safe only when the branch tip is part of the verified history:
+          // a tip BEHIND the verified head ships a subset of the verified tree;
+          // a tip AHEAD (fast-forward) or DIVERGED (rewrite) ships unverified code.
+          const contains = await git(['merge-base', '--is-ancestor', tip, commit], { cwd: repoRoot });
+          if (contains.exitCode !== 0) {
+            branchMoved = true;
+            movedTip = tip;
+            break;
+          }
+        }
+      }
+    } catch {
+      // git unavailable or odd state — fall through to the legacy on-branch check
+    }
+
+    if (branchMoved && !opts.allowMoved) {
+      const err = new Error(
+        `worker branch moved since verify: verified head ${commit.slice(0, 12)}, branch tip ${movedTip?.slice(0, 12)} is not part of the verified history. ` +
+        `Commits added after verify were NOT checked. Re-verify first: baton verify ${taskId}. ` +
+        `To accept the verified commit only, knowing the branch moved: baton accept ${taskId} --allow-moved`
+      );
+      (err as Error & { exitCode?: number }).exitCode = 4;
+      throw err;
+    }
+
     // P1 (v1.2 §6): force-push detection. When the current branch is a baton worker
     // branch and the verified head is no longer reachable from its tip, the branch
     // was rewritten after verify — fail with a re-verify hint instead of accepting
-    // a stale head.
+    // a stale head. (v1.3.3: superseded for the task's own branches by the check
+    // above; kept as defense in depth for baton/* branches checked out right now.)
     try {
       const curBranch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: repoRoot })).stdout.trim();
       if (curBranch.startsWith('baton/') && curBranch !== 'HEAD') {
@@ -133,9 +182,10 @@ export async function accept(
       task: taskId,
       commit,
       override: opts.override ?? null,
+      ...(branchMoved ? { branch_moved: true, branch_tip: movedTip as string } : {}),
     });
 
-    return { taskId, commit, override: opts.override };
+    return { taskId, commit, override: opts.override, branchMoved: branchMoved || undefined };
   });
 }
 
