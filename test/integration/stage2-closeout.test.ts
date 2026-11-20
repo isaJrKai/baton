@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 
+import { cliRunner } from '../helpers.js';
 const CLI_DIR = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '../..');
 
 function runBaton(args: string[], cwd: string, opts: { allowBranch?: boolean } = {}): { stdout: string; stderr: string; code: number } {
@@ -30,7 +31,7 @@ function runBaton(args: string[], cwd: string, opts: { allowBranch?: boolean } =
   const allArgs = needsAllowWeak ? [...finalArgs, '--allow-weak', 'test allows weak checks'] : finalArgs;
   const quotedArgs = allArgs.map(a => a.includes(' ') ? `"${a}"` : a);
   try {
-    const stdout = execSync(`npx tsx ${path.join(CLI_DIR, 'src/cli.ts')} ${quotedArgs.join(' ')}`, {
+    const stdout = execSync(`${cliRunner()} ${quotedArgs.join(' ')}`, {
       cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 30000,
     });
     return { stdout, stderr: '', code: 0 };
@@ -447,7 +448,7 @@ describe('Stage 2.5 Item 6: task ready blocks + --allow-weak + report check exit
     // Instead, call the CLI directly:
     const directResult = (() => {
       try {
-        const stdout = execSync(`npx tsx ${path.join(CLI_DIR, 'src/cli.ts')} task ready T-0001 --allow-branch`, {
+        const stdout = execSync(`${cliRunner()} task ready T-0001 --allow-branch`, {
           cwd: repoDir, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 30000,
         });
         return { stdout, stderr: '', code: 0 };
@@ -489,7 +490,7 @@ describe('Stage 2.5 Item 6: task ready blocks + --allow-weak + report check exit
     // Use --allow-weak with a reason
     const directResult = (() => {
       try {
-        const stdout = execSync(`npx tsx ${path.join(CLI_DIR, 'src/cli.ts')} task ready T-0001 --allow-branch --allow-weak "documentation-only task"`, {
+        const stdout = execSync(`${cliRunner()} task ready T-0001 --allow-branch --allow-weak "documentation-only task"`, {
           cwd: repoDir, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 30000,
         });
         return { stdout, stderr: '', code: 0 };

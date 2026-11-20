@@ -6,7 +6,7 @@
 //   orphan reports, stale worktrees.
 // Warnings (exit 0): report whose task is done/rejected, several terminal events,
 //   missing gitignore, STATE.md over 60 lines.
-import { readLedger, rewriteLedger } from '../io/ledger-file.js';
+import { readLedger, rewriteLedger, eventHash } from '../io/ledger-file.js';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import * as yaml from 'yaml';
@@ -81,6 +81,27 @@ export async function doctor(repoRoot: string): Promise<{ findings: DoctorFindin
     seenIds.add(e.id);
   }
 
+  // 2c. v1.3.2 P3: hash chain verification. Every non-empty prev_hash must
+  // equal the computed hash of SOME earlier entry. Fork-tolerant: a union
+  // merge of two branches that both appended keeps both sides' references
+  // valid (each references the common fork-tail, still earlier in the file).
+  // Entries without prev_hash (legacy ledgers) are not checked.
+  {
+    const seenHashes = new Set<string>();
+    for (const e of events) {
+      const prev = (e as { prev_hash?: string }).prev_hash;
+      if (prev && prev.length > 0 && !seenHashes.has(prev)) {
+        findings.push({
+          level: 'error',
+          code: 'E_LEDGER_CHAIN_BREAK',
+          message: `ledger.jsonl: ${e.id} references prev_hash ${prev.slice(0, 12)}... which is not any earlier entry — the referenced entry was tampered with or reordered`,
+          fix: 'Run: baton doctor --fix (rebuilds the prev_hash chain; inspect the ledger history first)',
+        });
+      }
+      seenHashes.add(eventHash(e));
+    }
+  }
+
   // 3. Check task files
   const tasksDir = path.join(repoRoot, 'project-memory/tasks');
   let taskFiles: string[];
@@ -124,11 +145,25 @@ export async function doctor(repoRoot: string): Promise<{ findings: DoctorFindin
   // 5. Check locked task hashes match base branch
   const state = replay(events);
   let baseBranch = 'main';
+  let policyRaw: { default_branch?: string; allowed_commands?: string[]; execution?: { sandbox?: string } } | null = null;
   try {
     const policyText = await readFile(path.join(repoRoot, '.baton/policy.yml'), 'utf8');
-    const policyRaw = yaml.parse(policyText) as { default_branch?: string } | null;
+    policyRaw = yaml.parse(policyText) as { default_branch?: string; allowed_commands?: string[]; execution?: { sandbox?: string } } | null;
     if (policyRaw?.default_branch) baseBranch = policyRaw.default_branch;
   } catch { /* use default */ }
+
+  // 5b. v1.3.2 P1: unsandboxed cmd execution outside CI is a trust-boundary
+  // warning. cmd checks run worker-written code; with allowed_commands set and
+  // sandbox none, that code runs directly on this machine.
+  const allowedCommands = policyRaw?.allowed_commands ?? [];
+  const sandboxMode = policyRaw?.execution?.sandbox ?? 'none';
+  if (allowedCommands.length > 0 && sandboxMode !== 'docker' && !process.env.CI) {
+    findings.push({
+      level: 'warning',
+      code: 'W_SANDBOX_NONE',
+      message: 'cmd checks execute worker-written code directly on this machine (execution.sandbox: none). Set execution.sandbox: docker (no network, worktree-only mount), or run verify only inside CI on an ephemeral runner.',
+    });
+  }
 
   for (const [taskId, t] of state.tasks) {
     if (!t.lockedHash) continue;

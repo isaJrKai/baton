@@ -40,8 +40,13 @@ export interface CheckContext {
   taskId: string;
 }
 
-// diff_scope always-deny list per spec TABLE 4 row 2
-// Plus build artifacts (node_modules, dist, .vite) that should never count as scope changes.
+// diff_scope always-deny list per spec TABLE 4 row 2.
+// Build artifacts (node_modules, dist, .vite) are ALSO always-denied: they are
+// not referee files, but changes to them are violations unless the task's
+// diff_scope allow list names them explicitly (v1.3.2 decision — the old
+// comment claimed they "should never trip scope", which the code never did).
+// Note dist/ is committed in this very repo, so baton-on-baton tasks touching
+// dist/** need an explicit allow entry.
 const ALWAYS_DENIED = [
   '.baton/**',
   'project-memory/tasks/**',
@@ -58,11 +63,6 @@ const ALWAYS_DENIED = [
 // Check if a path is allowed by any of the allow globs
 function pathAllowed(p: string, allow: string[]): boolean {
   return allow.some(g => isMatch(p, g));
-}
-
-// Check if a path matches any always-denied glob (unless explicitly allowed)
-function pathExplicitlyAllowed(p: string, allow: string[]): boolean {
-  return ALWAYS_DENIED.some(g => isMatch(p, g)) && allow.some(g => isMatch(p, g));
 }
 
 async function runDiffScope(ctx: CheckContext, check: Extract<Check, { type: 'diff_scope' }>): Promise<CheckResult> {
@@ -120,23 +120,94 @@ function lastNLines(text: string, n: number): string {
   return lines.slice(-n).join('\n');
 }
 
-async function runCmd(ctx: CheckContext, check: Extract<Check, { type: 'cmd' }>): Promise<CheckResult> {
-  // Verify command is allowlisted
-  const allowEntry = ctx.policy.allowed_commands.find(a => {
-    if (a.endsWith(' *')) {
-      return check.run.startsWith(a.slice(0, -2));
+/**
+ * v1.3.2 P1: wrap a cmd argv for docker-sandboxed execution. No network, the
+ * worktree is the only mounted path (nothing outside it is visible at all),
+ * and the wrapped command runs as the container entrypoint. Pure function —
+ * unit tested without docker.
+ */
+export function dockerWrap(argv: string[], worktree: string, image: string): string[] {
+  return [
+    'docker', 'run', '--rm',
+    '--network=none',
+    '-v', `${worktree}:${worktree}`,
+    '-w', worktree,
+    image,
+    ...argv,
+  ];
+}
+
+/**
+ * v1.3.2 P2: for package.json, only changes to the `scripts` block count as
+ * protected — a worker may still add dependencies. Compares the parsed scripts
+ * objects. Unparseable files fail closed (treated as changed).
+ */
+export function packageJsonScriptsChanged(baseText: string, headText: string): boolean {
+  const parseScripts = (text: string): Record<string, string> | null => {
+    try {
+      const parsed = JSON.parse(text) as { scripts?: Record<string, string> };
+      return parsed.scripts ?? null;
+    } catch {
+      return null;
     }
-    return a === check.run;
-  });
+  };
+  const baseScripts = parseScripts(baseText);
+  const headScripts = parseScripts(headText);
+  if (baseScripts === null && headScripts === null) return false;  // no scripts block on either side
+  if (baseScripts === null || headScripts === null) return true;
+  const baseKeys = Object.keys(baseScripts).sort();
+  const headKeys = Object.keys(headScripts).sort();
+  if (baseKeys.length !== headKeys.length) return true;
+  for (let i = 0; i < baseKeys.length; i++) {
+    const bk = baseKeys[i]!, hk = headKeys[i]!;
+    if (bk !== hk) return true;
+    if (baseScripts[bk] !== headScripts[hk]) return true;
+  }
+  return false;
+}
+
+/**
+ * v1.3.2 P2: allowlist matching on argv TOKENS, not string prefixes.
+ * For entries ending " *", the entry's tokens must equal the leading argv
+ * tokens exactly; the wildcard covers only the remaining args. So with
+ * allowlist "node *", `nodemon x` and `node_evil x` are denied. Non-wildcard
+ * entries must equal the whole argv. Returns the matched entry or null.
+ */
+export function commandAllowed(argv: string[], allowed: string[]): string | null {
+  const argvLine = argv.join(' ');
+  for (const a of allowed) {
+    if (a.endsWith(' *')) {
+      const entryTokens = a.slice(0, -2).trim().split(/\s+/).filter(Boolean);
+      if (entryTokens.length === 0) continue;
+      if (argv.length >= entryTokens.length && entryTokens.every((t, i) => argv[i] === t)) {
+        return a;
+      }
+    } else if (a === argvLine) {
+      return a;
+    }
+  }
+  return null;
+}
+
+async function runCmd(ctx: CheckContext, check: Extract<Check, { type: 'cmd' }>): Promise<CheckResult> {
+  // v1.3.2 P2: argv first — string form splits on whitespace, array form is
+  // already tokens. All allowlist matching happens on tokens.
+  const argv: string[] = Array.isArray(check.run) ? [...check.run] : check.run.split(/\s+/).filter(Boolean);
+  const runLabel = Array.isArray(check.run) ? JSON.stringify(check.run) : check.run;
+
+  // Verify command is allowlisted
+  const allowEntry = commandAllowed(argv, ctx.policy.allowed_commands);
   if (!allowEntry) {
     return {
       id: check.id, type: check.type, description: check.description,
       result: 'fail',
-      reason: `command not on allowlist: ${check.run}. Add to .baton/policy.yml allowed_commands.`,
+      reason: `command not on allowlist: ${runLabel}. Add to .baton/policy.yml allowed_commands.`,
     };
   }
-  // For " *" suffix, verify remaining args have no forbidden chars
-  if (allowEntry.endsWith(' *')) {
+  // For " *" suffix on the string form, verify remaining args have no
+  // forbidden chars (defense in depth; the schema already rejects them at the
+  // task level). Array-form tokens are inert under shell: false.
+  if (allowEntry.endsWith(' *') && !Array.isArray(check.run)) {
     const suffix = check.run.slice(allowEntry.length - 2);
     if (/[;&|<>`$()\n]/.test(suffix)) {
       return {
@@ -145,10 +216,22 @@ async function runCmd(ctx: CheckContext, check: Extract<Check, { type: 'cmd' }>)
       };
     }
   }
-  // Split command into argv
-  const argv = check.run.split(/\s+/).filter(Boolean);
+  let execArgv = argv;
+  // v1.3.2 P1: docker sandbox — no network, worktree is the only visible path.
+  // Fail closed when the image is missing (fail loudly beats silent local run).
+  if (ctx.policy.execution.sandbox === 'docker') {
+    const image = ctx.policy.execution.docker_image;
+    if (!image) {
+      return {
+        id: check.id, type: check.type, description: check.description,
+        result: 'fail',
+        reason: 'execution.sandbox is docker but execution.docker_image is empty. Set docker_image in .baton/policy.yml.',
+      };
+    }
+    execArgv = dockerWrap(argv, ctx.worktreePath, image);
+  }
   // Run in worktree
-  const result = await run(argv, {
+  const result = await run(execArgv, {
     cwd: ctx.worktreePath,
     timeoutMs: ctx.policy.execution.timeout_seconds * 1000,
     envPassthrough: ctx.policy.env_passthrough,
@@ -158,7 +241,7 @@ async function runCmd(ctx: CheckContext, check: Extract<Check, { type: 'cmd' }>)
   const logDir = path.join(ctx.repoRoot, '.baton', 'runs', ctx.runId);
   await mkdir(logDir, { recursive: true });
   const logPath = path.join(logDir, `${check.id}.log`);
-  const logContent = `=== CMD: ${check.run} ===\n=== EXIT: ${result.code} ===\n=== TIMEOUT: ${result.timedOut} ===\n=== DURATION: ${result.durationMs}ms ===\n\n--- STDOUT ---\n${result.stdout}\n--- STDERR ---\n${result.stderr}\n`;
+  const logContent = `=== CMD: ${runLabel} ===\n=== EXIT: ${result.code} ===\n=== TIMEOUT: ${result.timedOut} ===\n=== DURATION: ${result.durationMs}ms ===\n\n--- STDOUT ---\n${result.stdout}\n--- STDERR ---\n${result.stderr}\n`;
   await writeFile(logPath, logContent, 'utf8');
   const logSha = sha256Sync(logContent);
   const logMeta = { path: `.baton/runs/${ctx.runId}/${check.id}.log`, sha256: logSha };
@@ -303,6 +386,22 @@ async function runContract(ctx: CheckContext, check: Extract<Check, { type: 'con
 
 async function runNoSecrets(ctx: CheckContext): Promise<CheckResult> {
   try {
+    // v1.3.2: an ADDED credential file fails regardless of content. A committed
+    // .env is a leak waiting to happen even when the current placeholders look
+    // innocent, and content scanners can never prove future values are safe.
+    const nameStatus = await diffNameStatus(ctx.repoRoot, ctx.baseCommit, ctx.headCommit);
+    const envFiles = nameStatus.filter(c =>
+      (c.status === 'A' || c.status === 'R') && isMatch(path.posix.basename(c.path), '.env*'),
+    );
+    if (envFiles.length > 0) {
+      const listed = envFiles.slice(0, 5).map(c => c.path).join(', ')
+        + (envFiles.length > 5 ? ', ...' : '');
+      return {
+        id: 'no_secrets', type: 'no_secrets',
+        result: 'fail',
+        reason: `${envFiles.length} credential file(s) added: ${listed}. Environment files must never be committed — use .env.example-style templates outside the diff or a secret manager.`,
+      };
+    }
     // Get added lines only (git diff -U0 base..head)
     const { git } = await import('../io/git.js');
     const r = await git(['diff', '-U0', ctx.baseCommit, ctx.headCommit], { cwd: ctx.repoRoot });
@@ -414,7 +513,28 @@ export async function enforceProtectedPaths(
   const globs = ctx.policy.protected_paths ?? [];
   if (globs.length === 0) return { row: null, restored: [] };
   const changed = await diffNameOnly(ctx.repoRoot, ctx.baseCommit, ctx.headCommit);
-  const hits = changed.filter(p => globs.some(g => isMatch(p, g)));
+  let hits = changed.filter(p => globs.some(g => isMatch(p, g)));
+
+  // v1.3.2 P2: package.json special case — only changes to the `scripts`
+  // block count as protected, so dependency edits stay allowed. Compare the
+  // base (merge-base) and head versions; drop the hit when scripts match.
+  const pkgHits = hits.filter(p => path.posix.basename(p) === 'package.json');
+  if (pkgHits.length > 0) {
+    const stillChanged: string[] = [];
+    for (const p of pkgHits) {
+      let scriptsChanged = true;  // fail closed
+      try {
+        const baseText = await readFileAtRef(ctx.repoRoot, ctx.baseCommit, p);
+        const headText = await readFileAtRef(ctx.repoRoot, ctx.headCommit, p);
+        scriptsChanged = packageJsonScriptsChanged(baseText, headText);
+      } catch {
+        // missing at either ref (added or deleted) → fail closed
+      }
+      if (scriptsChanged) stillChanged.push(p);
+    }
+    hits = hits.filter(p => !(pkgHits.includes(p)) || stillChanged.includes(p));
+  }
+
   if (hits.length === 0) return { row: null, restored: [] };
 
   const listed = hits.slice(0, 5).join(', ') + (hits.length > 5 ? ', ...' : '');

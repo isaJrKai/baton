@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 
+import { cliRunner } from '../helpers.js';
 const CLI_DIR = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '../..');
 
 function runBaton(args: string[], cwd: string): { stdout: string; stderr: string; code: number } {
@@ -27,7 +28,7 @@ function runBaton(args: string[], cwd: string): { stdout: string; stderr: string
   ];
   const quotedArgs = finalArgs.map(a => a.includes(' ') ? `"${a}"` : a);
   try {
-    const stdout = execSync(`npx tsx ${path.join(CLI_DIR, 'src/cli.ts')} ${quotedArgs.join(' ')}`, {
+    const stdout = execSync(`${cliRunner()} ${quotedArgs.join(' ')}`, {
       cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 30000,
     });
     return { stdout, stderr: '', code: 0 };

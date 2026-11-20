@@ -4,6 +4,9 @@
 //   - ledger carries the outcomes: accepted / rejected / verify failures
 // Score = 10·accepted − 5·rejected − 1·verify_failures (deterministic, explainable).
 // The orchestrator uses this to prefer reliable workers when dispatching (Stage 6).
+// v1.3.2 P3: the worker identity is SELF-DECLARED (report front matter, not
+// bound to a lease or ledger writer), so the output is explicitly labeled
+// advisory.
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import * as yaml from 'yaml';
@@ -98,6 +101,8 @@ export function formatWorkersOutput(list: WorkerReputation[]): string {
   }
   const lines = [
     'Worker reputation (score = 10·accepted − 5·rejected − 1·verify_failures):',
+    'ADVISORY — worker names are self-declared in report front matter and are not',
+    'bound to a lease or the ledger writer; treat rankings as a dispatch hint.',
     '',
   ];
   for (const w of list) {

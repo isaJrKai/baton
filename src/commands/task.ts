@@ -11,6 +11,7 @@ import { readFile, writeFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import * as yaml from 'yaml';
 import { TaskSchema, type Task, type Check } from '../core/schemas.js';
+import { commandAllowed } from '../core/check-engine.js';
 import { withLock } from '../io/lock.js';
 import { sha256Sync } from '../io/hash.js';
 import { appendLedger, readLedger, nextEventId } from '../io/ledger-file.js';
@@ -207,29 +208,46 @@ export async function taskReady(
     const policyRaw = yaml.parse(policyText) as { allowed_commands?: string[] } | null;
     const allowedCommands = policyRaw?.allowed_commands ?? [];
     const missingCommands: string[] = [];
+    const arrayCmdEntries: string[] = [];  // derived allowlist entries for argv-array runs
     for (const check of task.checks) {
       if (check.type === 'cmd') {
-        const isAllowed = allowedCommands.some(a => {
-          if (a.endsWith(' *')) return check.run.startsWith(a.slice(0, -2));
-          return a === check.run;
-        });
-        if (!isAllowed) {
-          missingCommands.push(check.run);
+        // v1.3.2 P2: allowlist matching on argv tokens (commandAllowed), same
+        // engine as verify — string-prefix lookalikes ("nodemon x") can't pass.
+        const argv = Array.isArray(check.run) ? [...check.run] : check.run.split(/\s+/).filter(Boolean);
+        if (!commandAllowed(argv, allowedCommands)) {
+          missingCommands.push(Array.isArray(check.run) ? JSON.stringify(check.run) : check.run);
+          if (Array.isArray(check.run)) {
+            // Conservative derived entry: first token + wildcard (owner can tighten).
+            const entry = argv.length === 1 ? argv[0]! : argv[0]! + ' *';
+            if (!arrayCmdEntries.includes(entry)) arrayCmdEntries.push(entry);
+          }
         }
       }
     }
     if (missingCommands.length > 0) {
       if (opts.addAllowlist) {
-        // Auto-add the missing commands to policy.yml
-        const updatedPolicyText = addCommandsToPolicy(policyText, missingCommands);
+        // Auto-add the missing commands to policy.yml. Array-form runs derive
+        // a conservative "first token *" entry instead of their JSON label.
+        const toAdd = missingCommands.map(cmd => {
+          if (!cmd.startsWith('["')) return cmd;
+          try {
+            const argv = JSON.parse(cmd) as string[];
+            return argv.length === 1 ? argv[0]! : argv[0]! + ' *';
+          } catch { return cmd; }
+        }).filter(cmd => !cmd.startsWith('["'));
+        for (const e of arrayCmdEntries) if (!toAdd.includes(e)) toAdd.push(e);
+        const updatedPolicyText = addCommandsToPolicy(policyText, toAdd);
         await writeFile(policyPath, updatedPolicyText, 'utf8');
         // Re-read to verify
         const verifyText = await readFile(policyPath, 'utf8');
         const verifyRaw = yaml.parse(verifyText) as { allowed_commands?: string[] } | null;
         const updatedAllowed = verifyRaw?.allowed_commands ?? [];
-        const stillMissing = missingCommands.filter(cmd =>
-          !updatedAllowed.some(a => a === cmd || (a.endsWith(' *') && cmd.startsWith(a.slice(0, -2))))
-        );
+        const stillMissing = task.checks.filter((c): c is Extract<typeof c, { type: 'cmd' }> => c.type === 'cmd')
+          .filter(c => {
+            const argv = Array.isArray(c.run) ? [...c.run] : c.run.split(/\s+/).filter(Boolean);
+            return !commandAllowed(argv, updatedAllowed);
+          })
+          .map(c => Array.isArray(c.run) ? JSON.stringify(c.run) : c.run);
         if (stillMissing.length > 0) {
           const err = new Error(
             `failed to add commands to policy.yml. Still missing: ${stillMissing.join(', ')}`

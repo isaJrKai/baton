@@ -5,6 +5,9 @@ export default defineConfig({
   css: { postcss: { plugins: [] } },
   test: {
     include: ['test/**/*.test.ts'],
+    // v1.3.2 P3 (test speed): build dist/cli.js once when stale so tests
+    // spawn node dist/cli.js instead of npx tsx src/cli.ts per command.
+    globalSetup: './test/global-setup.ts',
     testTimeout: 10000,
   },
   resolve: {

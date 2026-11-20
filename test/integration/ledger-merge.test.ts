@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 
+import { cliRunner } from '../helpers.js';
 const CLI_DIR = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '../..');
 
 function runBaton(args: string[], cwd: string): { stdout: string; stderr: string; code: number } {
@@ -34,7 +35,7 @@ function runBaton(args: string[], cwd: string): { stdout: string; stderr: string
   ];
   const quotedArgs = finalArgs.map(a => a.includes(' ') ? `"${a}"` : a);
   try {
-    const stdout = execSync(`npx tsx ${path.join(CLI_DIR, 'src/cli.ts')} ${quotedArgs.join(' ')}`, {
+    const stdout = execSync(`${cliRunner()} ${quotedArgs.join(' ')}`, {
       cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 120000,
     });
     return { stdout, stderr: '', code: 0 };
@@ -117,6 +118,10 @@ describe('v1.3.1: ledger survives union merge of diverged branches', () => {
     const detected = runBaton(['doctor'], repoDir);
     expect(detected.code).toBe(3);
     expect(detected.stdout).toContain('E_DUPLICATE_EVENT_ID');
+    // v1.3.2 P3: the prev_hash chain is fork-tolerant — both branches chained
+    // onto the same fork-tail entry, which is still earlier in the merged
+    // file. The union merge must NOT break the chain.
+    expect(detected.stdout).not.toContain('E_LEDGER_CHAIN_BREAK');
 
     // 2. doctor --fix repairs: renumber, append ledger_repaired event
     const fixed = runBaton(['doctor', '--fix'], repoDir);

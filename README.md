@@ -167,6 +167,23 @@ baton doctor        # clean; ID allocation continues from the repaired tail
 
 It runs `baton doctor`, then `baton verify` for the task at the PR head, and appends a `baton:ci` Markdown summary to the step summary. A failing check fails the job — verified claims, not vibes, gate the PR.
 
+## Trust model
+
+Baton runs on your machine, so it is honest about what runs there:
+
+- `cmd` checks **execute worker-written code**. A worker (an AI agent) wrote
+  that code; baton only checks that it runs inside the allowlist, in a detached
+  worktree, with a sanitized environment. That is scoped, not safe.
+- Since v1.3.2 every `cmd` run gets a throwaway `HOME`/`TMPDIR` (deleted when
+  the run finishes), so worker code cannot read `~/.ssh`, `~/.npmrc`, or cloud
+  credentials. Secret-like environment variables are dropped. `env_passthrough`
+  cannot restore the real profile.
+- `execution.sandbox: docker` goes further: each check runs in a container with
+  no network and no path mounted except the worktree. `baton doctor` warns when
+  `none` is used outside CI.
+- **Recommendation:** treat local `baton verify` as convenience, not security.
+  Put the verify gate in CI on an ephemeral runner (see the GitHub Action
+  below) — that is the environment where untrusted code execution belongs.
 ## Security model
 
 - All git access goes through one wrapper allowlisting read-only subcommands plus `worktree add --detach / remove / list`; `git config` is explicitly forbidden (G6/G7).

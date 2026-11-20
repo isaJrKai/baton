@@ -1,5 +1,74 @@
 # Changelog
 
+## 1.3.2 — Hardening the trust boundary
+
+Second external review (tsc clean, 145/145 pass), verified gaps only. No new
+features. Every item landed test-first; suite at 223 tests, ~53 s (was 253 s).
+
+### P1 — secrets (`no_secrets`)
+- New scanner patterns for real-world credentials that were verified MISSED:
+  connection URLs with embedded credentials (`postgresql://user:pw@...`,
+  quoted or unquoted), `sk-`-prefixed keys (OpenAI/Anthropic style), Google
+  `AIza...` keys, JWTs (Supabase style), and unquoted `.env`-style assignments
+  (`password = hunter2...`, case-insensitive).
+- Obvious placeholders (`example`, `changeme`, `your_`, `xxxx`, `<...>`) are
+  skipped per match, so example files stay clean.
+- An ADDED `.env*` file fails `no_secrets` regardless of content — a committed
+  env file is a leak waiting to happen even when today's values look innocent.
+
+### P1 — execution sandbox (`cmd` checks run worker code)
+- Every `cmd` run gets a throwaway `HOME`/`USERPROFILE`/`TMPDIR`/`TEMP`/`TMP`
+  (created per run, deleted when it settles). Worker code can no longer read
+  `~/.ssh`, `~/.npmrc`, `.aws/credentials`; `env_passthrough` cannot restore
+  the real profile.
+- `execution.sandbox: none | docker` in policy (default `none`). `docker`
+  wraps checks in a container with no network and no mounted path except the
+  worktree (requires `execution.docker_image`; missing image fails closed).
+- `baton doctor` warns (`W_SANDBOX_NONE`) when commands are allowlisted but
+  the sandbox is `none` outside CI.
+- README gains a plain-language "Trust model" section recommending the CI gate
+  on an ephemeral runner for untrusted code execution.
+
+### P2 — check engine
+- Allowlist matching is token-exact, not prefix-of-string: with
+  `["node *","npm test *"]`, `nodemon x`, `node_evil x` and `npm testing-x`
+  were all ALLOWED; now denied.
+- Task YAML accepts `run` as an argv array (`run: [npm, test, --, -t, "a b"]`)
+  so quoted arguments survive; the string form stays for simple commands.
+  `shell: false` everywhere.
+- `protected_paths` default now covers the files that define how tests run:
+  `package.json` (scripts block only — dependency edits stay allowed),
+  `vitest.config.*`, `jest.config.*`, `playwright.config.*`, `pytest.ini`,
+  `conftest.py`, `tox.ini`, `tsconfig*.json`, `Makefile`.
+
+### P3 — smaller items
+- Ledger tamper-evidence: entries carry `prev_hash` (computed hash of the
+  entry appended after; `''` for genesis). Verification is fork-tolerant — a
+  `prev_hash` must match some earlier entry — so a union merge of two branches
+  that both appended stays valid (each references the common fork-tail).
+  `doctor` reports `E_LEDGER_CHAIN_BREAK`; `doctor --fix` rebuilds the chain.
+  Legacy ledgers without `prev_hash` stay clean.
+- Windows: process-tree kill uses `taskkill /pid <pid> /T /F` (POSIX keeps the
+  process-group kill).
+- `pathExplicitlyAllowed` dead code removed; the ALWAYS_DENIED comment now
+  states the real semantics (build artifacts are deny-unless-explicitly-
+  allowed — tested both ways; `dist/` is committed in this repo).
+- `baton workers` output is labeled ADVISORY: worker names come from
+  self-declared report front matter, not from leases or the ledger writer.
+- Test speed: dist build + cached template git fixture → suite 253 s → ~53 s.
+- `npm audit`: fixed at source (`yaml` 2.9.1 runtime; `source-map-js`;
+  `tsx` 4.23.15; `vitest` 2.1.9). Remaining advisories are dev-only majors
+  (vitest 5, vite 6, zod 4) — documented, not upgraded (breaking changes).
+
+### Compatibility
+- File format unchanged (`baton_version: 1`); new policy fields default.
+- Ledger `prev_hash` is optional — old ledgers verify clean; appends start
+  chaining from the existing tail.
+- The referee boundary holds: `.baton/**` and `.github/workflows/**` remain
+  always-denied, `shell: false`, process-group kill, empty default allowlist,
+  test restore from merge-base, and the MCP server still exposes no
+  accept/reject tools.
+
 ## 1.3.1 — Tightening: merge repair, locked tests, portability
 
 Hardening from the first external review. No new features — fixes to make the

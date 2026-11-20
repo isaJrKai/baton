@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn, execSync } from 'node:child_process';
 
+import { cliRunner, cliRunnerArgv } from '../helpers.js';
 const CLI_DIR = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '../..');
 
 interface McpResponse {
@@ -29,7 +30,8 @@ async function makeTempRepo(): Promise<string> {
 
 async function mcpExchange(repoDir: string, requests: object[]): Promise<McpResponse[]> {
   return new Promise((resolve, reject) => {
-    const child = spawn('npx', ['tsx', path.join(CLI_DIR, 'src/cli.ts'), 'mcp'], {
+    const runnerArgv = cliRunnerArgv();
+    const child = spawn(runnerArgv[0]!, [...runnerArgv.slice(1), 'mcp'], {
       cwd: repoDir, stdio: ['pipe', 'pipe', 'pipe'], timeout: 60000,
     });
     let stdout = '';
@@ -52,7 +54,7 @@ describe('Stage 5: baton mcp (stdio JSON-RPC)', () => {
 
   beforeEach(async () => {
     repoDir = await makeTempRepo();
-    execSync(`npx tsx ${path.join(CLI_DIR, 'src/cli.ts')} init`, { cwd: repoDir, stdio: 'pipe' });
+    execSync(`${cliRunner()} init`, { cwd: repoDir, stdio: 'pipe' });
   });
 
   afterEach(async () => { await rm(repoDir, { recursive: true, force: true }); });
@@ -124,7 +126,8 @@ describe('Stage 5: baton mcp (stdio JSON-RPC)', () => {
   });
 
   it('returns -32601 for unknown methods and -32700 for malformed JSON', async () => {
-    const child = spawn('npx', ['tsx', path.join(CLI_DIR, 'src/cli.ts'), 'mcp'], {
+    const runnerArgv = cliRunnerArgv();
+    const child = spawn(runnerArgv[0]!, [...runnerArgv.slice(1), 'mcp'], {
       cwd: repoDir, stdio: ['pipe', 'pipe', 'pipe'], timeout: 60000,
     });
     let stdout = '';

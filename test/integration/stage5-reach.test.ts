@@ -6,6 +6,7 @@ import path from 'node:path';
 import { execSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+import { cliRunner } from '../helpers.js';
 const CLI_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 function runBaton(args: string[], cwd: string): { stdout: string; stderr: string; code: number } {
@@ -13,7 +14,7 @@ function runBaton(args: string[], cwd: string): { stdout: string; stderr: string
   // appended automatically; tests that need special flags pass them explicitly.
   const quotedArgs = args.map(a => a.includes(' ') ? `"${a}"` : a);
   try {
-    const stdout = execSync(`npx tsx ${path.join(CLI_DIR, 'src/cli.ts')} ${quotedArgs.join(' ')}`, {
+    const stdout = execSync(`${cliRunner()} ${quotedArgs.join(' ')}`, {
       cwd, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60000,
     });
     return { stdout, stderr: '', code: 0 };

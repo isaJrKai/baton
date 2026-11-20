@@ -167,16 +167,32 @@ execution:
   acknowledged: false
   timeout_seconds: 300
   docker_image: ""
+  # v1.3.2: none = cmd checks run directly on this machine (per-run HOME/TMPDIR
+  # isolation). docker = no-network container, worktree is the only visible path
+  # (requires docker_image). doctor warns when none is used outside CI.
+  sandbox: none
 allowed_commands: []
 env_passthrough: []
 # v1.3.1: files the worker is judged by. If a worker edits these and the task
 # does not set allow_protected, verify restores the merge-base versions before
 # running checks and fails the protected_paths row. Set to [] to disable.
+# v1.3.2: also covers the files that define how tests run. For package.json
+# only changes to the scripts block count as protected (dependency edits stay
+# allowed).
 protected_paths:
   - "test/**"
   - "tests/**"
   - "**/*.test.*"
   - "**/*.spec.*"
+  - "package.json"
+  - "vitest.config.*"
+  - "jest.config.*"
+  - "playwright.config.*"
+  - "pytest.ini"
+  - "conftest.py"
+  - "tox.ini"
+  - "tsconfig*.json"
+  - "Makefile"
 never_include:
   - ".env*"
   - "**/.env.*"

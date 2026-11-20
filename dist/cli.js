@@ -1,45 +1,1274 @@
 #!/usr/bin/env node
-import {
-  activeLeases,
-  appendLedger,
-  claimDedupeKey,
-  conflicts,
-  doctor,
-  done,
-  formatConflictsTable,
-  formatDoctorOutput,
-  formatDoneOutput,
-  formatStaleTable,
-  isMatch,
-  nextClaimId,
-  nextEventId,
-  nextRunId,
-  overlaps,
-  readLedger,
-  replay,
-  stale,
-  toPosix,
-  withLock
-} from "./chunk-7VIWVX5V.js";
-import {
-  cleanupStaleWorktrees,
-  diffNameOnly,
-  diffNameStatus,
-  fileExistsAtRef,
-  getCommitSha,
-  git,
-  isGitRepo,
-  isValidRefName,
-  lsFilesAtRef,
-  readFileAtRef
-} from "./chunk-5BBYUQF7.js";
+var __defProp = Object.defineProperty;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __esm = (fn, res) => function __init() {
+  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+};
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+
+// src/io/git.ts
+var git_exports = {};
+__export(git_exports, {
+  cleanupStaleWorktrees: () => cleanupStaleWorktrees,
+  diffNameOnly: () => diffNameOnly,
+  diffNameStatus: () => diffNameStatus,
+  fileExistsAtRef: () => fileExistsAtRef,
+  getCommitSha: () => getCommitSha,
+  getGitRoot: () => getGitRoot,
+  getShortSha: () => getShortSha,
+  git: () => git,
+  isGitRepo: () => isGitRepo,
+  isValidRefName: () => isValidRefName,
+  lsFilesAtRef: () => lsFilesAtRef,
+  readFileAtRef: () => readFileAtRef,
+  recentCommits: () => recentCommits,
+  relativeToGitRoot: () => relativeToGitRoot
+});
+import { spawn } from "node:child_process";
+import path from "node:path";
+async function getGitRoot(startDir) {
+  try {
+    const r = await git(["rev-parse", "--show-toplevel"], { cwd: startDir });
+    if (r.exitCode === 0) {
+      return r.stdout.trim();
+    }
+  } catch {
+  }
+  return startDir;
+}
+function relativeToGitRoot(gitRoot, absPath) {
+  return path.relative(gitRoot, absPath);
+}
+function git(args, opts) {
+  const [cmd, ...rest] = args;
+  if (!cmd) {
+    return Promise.reject(new Error("git: no command provided"));
+  }
+  if (FORBIDDEN_TOP.has(cmd)) {
+    return Promise.reject(new Error(`git ${cmd} is forbidden by G7`));
+  }
+  if (!ALLOWED_TOP.has(cmd)) {
+    return Promise.reject(new Error(`git ${cmd} is not in the allowlist (G6)`));
+  }
+  if (cmd === "worktree") {
+    const sub = rest[0];
+    if (!sub || !ALLOWED_WORKTREE_SUB.has(sub)) {
+      return Promise.reject(new Error(`git worktree ${sub ?? "<none>"} is not allowed`));
+    }
+  }
+  if (cmd === "status" && rest[0] !== "--porcelain") {
+    return Promise.reject(new Error("git status only allowed with --porcelain"));
+  }
+  return new Promise((resolve, reject2) => {
+    const p = spawn("git", args, { cwd: opts.cwd, shell: false });
+    let stdout = "";
+    let stderr = "";
+    p.stdout?.on("data", (d) => {
+      stdout += d.toString();
+    });
+    p.stderr?.on("data", (d) => {
+      stderr += d.toString();
+    });
+    p.on("error", (err) => reject2(new Error(`git spawn error: ${err.message}`)));
+    p.on("close", (code) => {
+      resolve({ stdout, stderr, exitCode: code ?? -1 });
+    });
+  });
+}
+function isValidRefName(name) {
+  return /^[A-Za-z0-9._\/-]+$/.test(name) && !name.includes("..");
+}
+async function getCommitSha(repoRoot, ref = "HEAD") {
+  if (!isValidRefName(ref) && ref !== "HEAD") {
+    throw new Error(`invalid ref name: ${ref}`);
+  }
+  const r = await git(["rev-parse", "--verify", ref], { cwd: repoRoot });
+  if (r.exitCode !== 0) {
+    throw new Error(`rev-parse --verify ${ref} failed: ${r.stderr}`);
+  }
+  return r.stdout.trim();
+}
+async function getShortSha(repoRoot, ref = "HEAD") {
+  const full = await getCommitSha(repoRoot, ref);
+  return full.slice(0, 7);
+}
+async function diffNameOnly(repoRoot, base, head) {
+  const r = await git(["diff", "--name-only", "--no-renames", base, head], { cwd: repoRoot });
+  if (r.exitCode !== 0) {
+    throw new Error(`git diff --name-only failed: ${r.stderr}`);
+  }
+  return r.stdout.split("\n").filter((l) => l.length > 0);
+}
+async function diffNameStatus(repoRoot, base, head) {
+  const r = await git(["diff", "--name-status", "--no-renames", base, head], { cwd: repoRoot });
+  if (r.exitCode !== 0) {
+    throw new Error(`git diff --name-status failed: ${r.stderr}`);
+  }
+  return r.stdout.split("\n").filter((l) => l.length > 0).map((l) => {
+    const [status2, ...rest] = l.split("	");
+    return { status: status2 ?? "?", path: rest.join("	") };
+  });
+}
+async function isGitRepo(repoRoot) {
+  try {
+    const r = await git(["rev-parse", "--git-dir"], { cwd: repoRoot });
+    return r.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+async function lsFilesAtRef(repoRoot, ref, prefix) {
+  const gitRoot = await getGitRoot(repoRoot);
+  const args = ["ls-tree", "-r", "--name-only", ref];
+  if (prefix) {
+    const gitRelativePrefix = path.relative(gitRoot, path.resolve(repoRoot, prefix));
+    args.push("--", gitRelativePrefix);
+  }
+  const r = await git(args, { cwd: gitRoot });
+  if (r.exitCode !== 0) {
+    throw new Error(`git ls-tree failed: ${r.stderr}`);
+  }
+  return r.stdout.split("\n").filter((l) => l.length > 0);
+}
+async function readFileAtRef(repoRoot, ref, filePath) {
+  const gitRoot = await getGitRoot(repoRoot);
+  const gitRelativePath = path.relative(gitRoot, path.resolve(repoRoot, filePath));
+  const r = await git(["show", `${ref}:${gitRelativePath}`], { cwd: gitRoot });
+  if (r.exitCode !== 0) {
+    throw new Error(`git show ${ref}:${gitRelativePath} failed: ${r.stderr}`);
+  }
+  return r.stdout;
+}
+async function fileExistsAtRef(repoRoot, ref, filePath) {
+  try {
+    const gitRoot = await getGitRoot(repoRoot);
+    const gitRelativePath = path.relative(gitRoot, path.resolve(repoRoot, filePath));
+    const r = await git(["cat-file", "-e", `${ref}:${gitRelativePath}`], { cwd: gitRoot });
+    return r.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+async function recentCommits(repoRoot, count, pathPrefix) {
+  const args = ["log", "-n", String(count), "--format=%h %s"];
+  if (pathPrefix) args.push("--", pathPrefix);
+  const r = await git(args, { cwd: repoRoot });
+  if (r.exitCode !== 0) return [];
+  return r.stdout.split("\n").filter((l) => l.length > 0);
+}
+async function cleanupStaleWorktrees(repoRoot) {
+  const r = await git(["worktree", "list", "--porcelain"], { cwd: repoRoot });
+  if (r.exitCode !== 0) return [];
+  const removed = [];
+  const blocks = r.stdout.split("\n\n");
+  for (const block of blocks) {
+    const lines = block.split("\n").filter((l) => l.length > 0);
+    const worktreeLine = lines.find((l) => l.startsWith("worktree "));
+    if (!worktreeLine) continue;
+    const wtPath = worktreeLine.slice("worktree ".length);
+    if (wtPath.includes(".baton/tmp/wt-")) {
+      try {
+        await git(["worktree", "remove", "--force", wtPath], { cwd: repoRoot });
+        removed.push(wtPath);
+      } catch {
+      }
+    }
+  }
+  return removed;
+}
+var ALLOWED_TOP, ALLOWED_WORKTREE_SUB, FORBIDDEN_TOP;
+var init_git = __esm({
+  "src/io/git.ts"() {
+    "use strict";
+    ALLOWED_TOP = /* @__PURE__ */ new Set([
+      "rev-parse",
+      "diff",
+      "log",
+      "show",
+      "ls-files",
+      "ls-tree",
+      "cat-file",
+      "merge-base",
+      "for-each-ref",
+      "status",
+      "worktree"
+    ]);
+    ALLOWED_WORKTREE_SUB = /* @__PURE__ */ new Set(["add", "remove", "list"]);
+    FORBIDDEN_TOP = /* @__PURE__ */ new Set([
+      "commit",
+      "push",
+      "merge",
+      "rebase",
+      "reset",
+      "checkout",
+      "clean",
+      "stash",
+      "config",
+      "init",
+      "clone",
+      "fetch",
+      "pull",
+      "remote",
+      "submodule",
+      "hook",
+      "reflog"
+    ]);
+  }
+});
+
+// src/io/lock.ts
+import { open, unlink } from "node:fs/promises";
+import path3 from "node:path";
+async function lock(repoRoot) {
+  const lockKey = path3.resolve(repoRoot);
+  if (heldLocks.has(lockKey)) return;
+  const lockPath = path3.join(repoRoot, ".baton", LOCK_FILE);
+  for (let i = 0; i < 50; i++) {
+    try {
+      const fh = await open(lockPath, "wx");
+      await fh.close();
+      heldLocks.add(lockKey);
+      return;
+    } catch (err) {
+      const code = err.code;
+      if (code !== "EEXIST") throw err;
+      await new Promise((r) => setTimeout(r, Math.min(40 * (i + 1), 2e3)));
+    }
+  }
+  throw new Error(`could not acquire .baton/lock after 50 attempts (file: ${lockPath})`);
+}
+async function unlock(repoRoot) {
+  const lockKey = path3.resolve(repoRoot);
+  if (!heldLocks.has(lockKey)) return;
+  heldLocks.delete(lockKey);
+  const lockPath = path3.join(repoRoot, ".baton", LOCK_FILE);
+  try {
+    await unlink(lockPath);
+  } catch {
+  }
+}
+async function withLock(repoRoot, fn) {
+  await lock(repoRoot);
+  try {
+    return await fn();
+  } finally {
+    await unlock(repoRoot);
+  }
+}
+var LOCK_FILE, heldLocks;
+var init_lock = __esm({
+  "src/io/lock.ts"() {
+    "use strict";
+    LOCK_FILE = "lock";
+    heldLocks = /* @__PURE__ */ new Set();
+  }
+});
+
+// src/io/hash.ts
+import { createHash } from "node:crypto";
+function sha256Sync(bytes) {
+  const input = typeof bytes === "string" ? Buffer.from(bytes, "utf8") : Buffer.from(bytes);
+  return createHash("sha256").update(input).digest("hex");
+}
+var init_hash = __esm({
+  "src/io/hash.ts"() {
+    "use strict";
+  }
+});
+
+// src/io/ledger-file.ts
+import { open as open2, readFile as readFile2, mkdir as mkdir2 } from "node:fs/promises";
+import path4 from "node:path";
+function ledgerFile(repoRoot) {
+  return path4.join(repoRoot, LEDGER_PATH);
+}
+function eventHash(event) {
+  const { prev_hash: _ignored, ...rest } = event;
+  return sha256Sync(JSON.stringify(rest));
+}
+async function tailHash(repoRoot) {
+  const { events } = await readLedger(repoRoot);
+  const last = events[events.length - 1];
+  return last ? eventHash(last) : "";
+}
+async function rewriteLedger(repoRoot, events) {
+  const { rename } = await import("node:fs/promises");
+  let parent = "";
+  const lines = events.map((e) => {
+    const entry = { ...e, prev_hash: parent };
+    const line = JSON.stringify(entry) + "\n";
+    parent = eventHash(entry);
+    if (Buffer.byteLength(line) > MAX_LINE_BYTES) {
+      throw new Error(`ledger line exceeds 64KB: ${e.id}`);
+    }
+    return line;
+  }).join("");
+  const target = ledgerFile(repoRoot);
+  const tmp = target + ".tmp";
+  await mkdir2(path4.dirname(target), { recursive: true });
+  const fh = await open2(tmp, "w");
+  try {
+    await fh.writeFile(lines);
+    await fh.sync();
+  } finally {
+    await fh.close();
+  }
+  await rename(tmp, target);
+}
+async function appendLedger(repoRoot, event) {
+  const raw = JSON.stringify(event) + "\n";
+  if (Buffer.byteLength(raw) > MAX_LINE_BYTES) {
+    throw new Error(`ledger line exceeds 64KB: ${event.id}`);
+  }
+  await mkdir2(path4.dirname(ledgerFile(repoRoot)), { recursive: true });
+  await withLock(repoRoot, async () => {
+    const parent = await tailHash(repoRoot);
+    const entry = { ...event, prev_hash: parent };
+    const line = JSON.stringify(entry) + "\n";
+    const fh = await open2(ledgerFile(repoRoot), "a");
+    try {
+      await fh.writeFile(line);
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
+  });
+}
+async function readLedger(repoRoot) {
+  let text;
+  try {
+    text = await readFile2(ledgerFile(repoRoot), "utf8");
+  } catch {
+    return { events: [], malformed: [] };
+  }
+  const lines = text.split("\n").filter((l) => l.length > 0);
+  const events = [];
+  const malformed = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    try {
+      events.push(JSON.parse(line));
+    } catch {
+      malformed.push({ line: i + 1, text: line });
+    }
+  }
+  return { events, malformed };
+}
+async function nextEventId(repoRoot) {
+  const { events } = await readLedger(repoRoot);
+  const existing = events.map((e) => e.id);
+  const nums = existing.map((s) => parseInt(s.split("-")[1] ?? "0", 10)).filter((n) => !isNaN(n));
+  const next2 = (nums.length ? Math.max(...nums) : 0) + 1;
+  return `e-${String(next2).padStart(6, "0")}`;
+}
+async function nextClaimId(repoRoot) {
+  const { events } = await readLedger(repoRoot);
+  const existing = events.filter((e) => e.type === "claim" && "claim_id" in e).map((e) => e.claim_id);
+  const nums = existing.map((s) => parseInt(s.split("-")[1] ?? "0", 10)).filter((n) => !isNaN(n));
+  const next2 = (nums.length ? Math.max(...nums) : 0) + 1;
+  return `c-${String(next2).padStart(4, "0")}`;
+}
+async function nextRunId(repoRoot) {
+  const { events } = await readLedger(repoRoot);
+  const existing = events.filter((e) => e.type === "verify_run" && "run_id" in e).map((e) => e.run_id);
+  const nums = existing.map((s) => parseInt(s.split("-")[1] ?? "0", 10)).filter((n) => !isNaN(n));
+  const next2 = (nums.length ? Math.max(...nums) : 0) + 1;
+  return `r-${String(next2).padStart(4, "0")}`;
+}
+function claimDedupeKey(claim) {
+  return `${claim.task}|${claim.statement}|${claim.key ?? ""}`;
+}
+function claimStatusDedupeKey(event) {
+  const commit = event.anchor?.commit ?? "";
+  const runId = event.run_id ?? "";
+  return `${event.claim_id}|${event.status}|${commit}|${runId}`;
+}
+var LEDGER_PATH, MAX_LINE_BYTES;
+var init_ledger_file = __esm({
+  "src/io/ledger-file.ts"() {
+    "use strict";
+    init_lock();
+    init_hash();
+    LEDGER_PATH = "project-memory/ledger.jsonl";
+    MAX_LINE_BYTES = 64 * 1024;
+  }
+});
+
+// src/core/globs.ts
+import picomatch from "picomatch";
+function toPosix(p) {
+  return p.replace(/\\/g, "/");
+}
+function isMatch(path25, glob) {
+  const posixPath2 = toPosix(path25);
+  const posixGlob = toPosix(glob);
+  return picomatch(posixGlob, { dot: true })(posixPath2);
+}
+function staticPrefix(glob) {
+  const segments = toPosix(glob).split("/").filter((s) => s.length > 0);
+  const result = [];
+  for (const seg of segments) {
+    if (/[*?[\]{}()!]/.test(seg)) break;
+    result.push(seg);
+  }
+  return result.join("/");
+}
+function overlaps(a, b) {
+  const pa = staticPrefix(a);
+  const pb = staticPrefix(b);
+  if (pa === "" || pb === "") return true;
+  if (pa === pb) return true;
+  const paSegs = pa.split("/");
+  const pbSegs = pb.split("/");
+  const minLen = Math.min(paSegs.length, pbSegs.length);
+  for (let i = 0; i < minLen; i++) {
+    if (paSegs[i] !== pbSegs[i]) return false;
+  }
+  return true;
+}
+var init_globs = __esm({
+  "src/core/globs.ts"() {
+    "use strict";
+  }
+});
+
+// src/core/ledger-replay.ts
+function replay(events) {
+  const state = {
+    tasks: /* @__PURE__ */ new Map(),
+    claims: /* @__PURE__ */ new Map(),
+    decisions: /* @__PURE__ */ new Map(),
+    lastVerifyBase: /* @__PURE__ */ new Map(),
+    leases: /* @__PURE__ */ new Map()
+  };
+  const seenClaimKeys = /* @__PURE__ */ new Set();
+  const seenClaimStatusKeys = /* @__PURE__ */ new Set();
+  for (const e of events) {
+    if (e.type === "task_locked") {
+      state.tasks.set(e.task, { status: "ready", lockedHash: e.hash, baseCommit: e.base_commit });
+    } else if (e.type === "task_unlocked") {
+      state.tasks.set(e.task, { status: "draft" });
+    } else if (e.type === "packet_issued") {
+      const t = state.tasks.get(e.task);
+      if (t) {
+        if (t.status === "ready" || t.status === "needs_work") t.status = "assigned";
+      }
+    } else if (e.type === "claim") {
+      const dedupeKey = claimDedupeKey({ task: e.task, statement: e.statement, key: e.key });
+      if (seenClaimKeys.has(dedupeKey)) continue;
+      seenClaimKeys.add(dedupeKey);
+      state.claims.set(e.claim_id, {
+        taskId: e.task,
+        statement: e.statement,
+        key: e.key,
+        status: "reported"
+      });
+    } else if (e.type === "claim_status") {
+      const dedupeKey = claimStatusDedupeKey({
+        claim_id: e.claim_id,
+        status: e.status,
+        anchor: e.anchor,
+        run_id: e.run_id
+      });
+      if (seenClaimStatusKeys.has(dedupeKey)) continue;
+      seenClaimStatusKeys.add(dedupeKey);
+      const c = state.claims.get(e.claim_id);
+      if (c) {
+        c.status = e.status;
+        if (e.anchor) c.anchor = e.anchor;
+        if (e.run_id) c.runId = e.run_id;
+      }
+    } else if (e.type === "verify_run") {
+      const t = state.tasks.get(e.task);
+      if (t) {
+        state.lastVerifyBase.set(e.task, e.base_commit);
+        t.latestVerifyHead = e.head_commit;
+        if (e.verdict === "all_pass" && (t.status === "assigned" || t.status === "in_review" || t.status === "needs_work" || t.status === "ready")) {
+          t.status = "in_review";
+        } else if (e.verdict === "has_failures" || e.verdict === "incomplete") {
+          if (t.status !== "in_review") t.status = "needs_work";
+        }
+      }
+    } else if (e.type === "accepted") {
+      const t = state.tasks.get(e.task);
+      if (t) t.status = "done";
+    } else if (e.type === "rejected") {
+      const t = state.tasks.get(e.task);
+      if (t) {
+        t.status = "rejected";
+        t.rejectCount = (t.rejectCount ?? 0) + 1;
+        if (e.follow_up_task) t.followUpTask = e.follow_up_task;
+      }
+    } else if (e.type === "escalated") {
+      const t = state.tasks.get(e.task);
+      if (t) t.escalated = true;
+    } else if (e.type === "blocked") {
+      const t = state.tasks.get(e.task);
+      if (t) {
+        t.priorStatus = t.status;
+        t.status = "blocked";
+      }
+    } else if (e.type === "unblocked") {
+      const t = state.tasks.get(e.task);
+      if (t && t.priorStatus) {
+        t.status = t.priorStatus;
+        t.priorStatus = void 0;
+      }
+    } else if (e.type === "decision_status") {
+      const d = state.decisions.get(e.decision) ?? { status: "proposed" };
+      d.status = e.to;
+      if (e.hash) d.hash = e.hash;
+      state.decisions.set(e.decision, d);
+    } else if (e.type === "lease_acquired") {
+      state.leases.set(e.task, {
+        worker: e.worker,
+        areas: e.areas,
+        ttlMinutes: e.ttl_minutes,
+        acquiredAt: e.ts
+      });
+    } else if (e.type === "lease_released") {
+      const l = state.leases.get(e.task);
+      if (l && !l.releasedAt) l.releasedAt = e.ts;
+    }
+  }
+  return state;
+}
+function activeLeases(state, nowMs = Date.now()) {
+  const out = [];
+  for (const [task2, l] of state.leases) {
+    if (l.releasedAt) continue;
+    const expiresMs = Date.parse(l.acquiredAt) + l.ttlMinutes * 6e4;
+    if (Number.isNaN(expiresMs) || expiresMs <= nowMs) continue;
+    out.push({ task: task2, worker: l.worker, areas: l.areas, expiresAt: new Date(expiresMs).toISOString() });
+  }
+  return out.sort((a, b) => a.task.localeCompare(b.task));
+}
+var init_ledger_replay = __esm({
+  "src/core/ledger-replay.ts"() {
+    "use strict";
+    init_ledger_file();
+  }
+});
+
+// src/commands/stale.ts
+import * as yaml7 from "yaml";
+import { readFile as readFile11 } from "node:fs/promises";
+import path14 from "node:path";
+function nowIso7() {
+  return (/* @__PURE__ */ new Date()).toISOString();
+}
+async function getBlobIds(repoRoot, ref) {
+  const gitRoot = await getGitRoot(repoRoot);
+  const r = await git(["ls-tree", "-r", ref], { cwd: gitRoot });
+  const result = /* @__PURE__ */ new Map();
+  for (const line of r.stdout.split("\n")) {
+    if (!line) continue;
+    const parts = line.split("	");
+    if (parts.length !== 2) continue;
+    const meta = parts[0].split(" ");
+    const blobId = meta[2];
+    const filePath = parts[1];
+    if (blobId && filePath) {
+      result.set(filePath, blobId);
+    }
+  }
+  return result;
+}
+async function stale(repoRoot, opts = {}) {
+  const { events } = await readLedger(repoRoot);
+  const state = replay(events);
+  let baseBranch = opts.baseBranch ?? "main";
+  try {
+    const policyText = await readFile11(path14.join(repoRoot, ".baton/policy.yml"), "utf8");
+    const policyRaw = yaml7.parse(policyText);
+    if (policyRaw?.default_branch) baseBranch = policyRaw.default_branch;
+  } catch {
+  }
+  const baseTip = await getCommitSha(repoRoot, baseBranch);
+  const baseBlobs = await getBlobIds(repoRoot, baseBranch);
+  const staleClaims = [];
+  let totalChecked = 0;
+  for (const [claimId, claim] of state.claims) {
+    if (claim.status !== "verified") continue;
+    if (!claim.anchor) continue;
+    totalChecked++;
+    const anchorCommit = claim.anchor.commit;
+    const watchGlobs = claim.anchor.watch.length > 0 ? claim.anchor.watch : [];
+    const anchorBlobs = await getBlobIds(repoRoot, anchorCommit);
+    const taskState = state.tasks.get(claim.taskId);
+    const isDone = taskState?.status === "done";
+    if (isDone) {
+      for (const [filePath, anchorBlob] of anchorBlobs) {
+        const isWatched = watchGlobs.length === 0 || watchGlobs.some((g) => isMatch(filePath, g));
+        if (!isWatched) continue;
+        const baseBlob = baseBlobs.get(filePath);
+        if (!baseBlob) {
+          staleClaims.push({ taskId: claim.taskId, claimId, reason: "watch_missing" });
+          break;
+        }
+        if (baseBlob !== anchorBlob) {
+          const mbResult = await git(["merge-base", "--is-ancestor", anchorCommit, baseTip], { cwd: repoRoot });
+          if (mbResult.exitCode !== 0) {
+            staleClaims.push({ taskId: claim.taskId, claimId, reason: "differs_from_base" });
+          } else {
+            staleClaims.push({ taskId: claim.taskId, claimId, reason: "changed_since_verified" });
+          }
+          break;
+        }
+      }
+    } else {
+      if (anchorCommit !== baseTip) {
+        staleClaims.push({ taskId: claim.taskId, claimId, reason: "branch_moved" });
+      }
+    }
+  }
+  if (!opts.dryRun && staleClaims.length > 0) {
+    await withLock(repoRoot, async () => {
+      const { events: currentEvents } = await readLedger(repoRoot);
+      const seenKeys = new Set(
+        currentEvents.filter((e) => e.type === "claim_status").map((e) => {
+          const cs = e;
+          return claimStatusDedupeKey({ claim_id: cs.claim_id, status: cs.status, anchor: cs.anchor, run_id: cs.run_id });
+        })
+      );
+      for (const sc of staleClaims) {
+        const dedupeKey = claimStatusDedupeKey({
+          claim_id: sc.claimId,
+          status: "stale",
+          anchor: void 0,
+          run_id: void 0
+        });
+        if (seenKeys.has(dedupeKey)) continue;
+        seenKeys.add(dedupeKey);
+        const eventId = await nextEventId(repoRoot);
+        await appendLedger(repoRoot, {
+          v: 1,
+          id: eventId,
+          ts: nowIso7(),
+          type: "claim_status",
+          claim_id: sc.claimId,
+          status: "stale",
+          reason: sc.reason
+        });
+      }
+    });
+  }
+  return { staleClaims, totalChecked };
+}
+function formatStaleTable(result) {
+  const lines = [];
+  lines.push(`Staleness check: ${result.totalChecked} verified claims checked, ${result.staleClaims.length} stale.`);
+  if (result.staleClaims.length > 0) {
+    lines.push("");
+    lines.push("CLAIM       TASK     REASON");
+    for (const sc of result.staleClaims) {
+      lines.push(`${sc.claimId.padEnd(12)} ${sc.taskId.padEnd(8)} ${sc.reason}`);
+    }
+  } else {
+    lines.push("No stale claims.");
+  }
+  return lines.join("\n");
+}
+var init_stale = __esm({
+  "src/commands/stale.ts"() {
+    "use strict";
+    init_ledger_file();
+    init_lock();
+    init_git();
+    init_ledger_replay();
+    init_globs();
+  }
+});
+
+// src/commands/conflicts.ts
+import { readFile as readFile12, readdir as readdir4 } from "node:fs/promises";
+import path15 from "node:path";
+import * as yaml8 from "yaml";
+function nowIso8() {
+  return (/* @__PURE__ */ new Date()).toISOString();
+}
+function parseFrontMatter7(text) {
+  const m = text.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!m) throw new Error("front matter not found");
+  return { frontMatter: yaml8.parse(m[1] ?? ""), body: m[2] ?? "" };
+}
+async function conflicts(repoRoot, opts = {}) {
+  const { events } = await readLedger(repoRoot);
+  if (opts.ack !== void 0 || opts.unack !== void 0) {
+    const key = opts.ack ?? opts.unack;
+    const note = opts.ackNote ?? opts.unackNote ?? "";
+    if (key) {
+      const isAck = opts.ack !== void 0;
+      await withLock(repoRoot, async () => {
+        const eventId = await nextEventId(repoRoot);
+        await appendLedger(repoRoot, {
+          v: 1,
+          id: eventId,
+          ts: nowIso8(),
+          type: "conflict_ack",
+          key,
+          note
+        });
+      });
+      console.log(`Conflict ${key} ${isAck ? "acknowledged" : "unacknowledged"}: ${note}`);
+    }
+  }
+  const state = replay(events);
+  const ackedKeys = /* @__PURE__ */ new Map();
+  for (const e of events) {
+    if (e.type === "conflict_ack") {
+      const ca = e;
+      ackedKeys.set(ca.key, { acknowledged: true, note: ca.note });
+    }
+  }
+  const decisionsByKey = /* @__PURE__ */ new Map();
+  const decisionsDir = path15.join(repoRoot, "project-memory/decisions");
+  let decisionFiles;
+  try {
+    decisionFiles = await readdir4(decisionsDir);
+  } catch {
+    decisionFiles = [];
+  }
+  for (const f of decisionFiles) {
+    if (!f.endsWith(".md")) continue;
+    try {
+      const text = await readFile12(path15.join(decisionsDir, f), "utf8");
+      const { frontMatter } = parseFrontMatter7(text);
+      const id = frontMatter.id;
+      const title = frontMatter.title;
+      const key = frontMatter.key;
+      const status2 = frontMatter.status;
+      if (status2 !== "accepted") continue;
+      const list = decisionsByKey.get(key) ?? [];
+      list.push({ id, title });
+      decisionsByKey.set(key, list);
+    } catch {
+    }
+  }
+  const decisionConflicts = [];
+  for (const [key, list] of decisionsByKey) {
+    if (list.length > 1) {
+      decisionConflicts.push({
+        key,
+        decisions: list,
+        acknowledged: ackedKeys.has(key)
+      });
+    }
+  }
+  const claimsByKey = /* @__PURE__ */ new Map();
+  for (const [id, claim] of state.claims) {
+    if (!claim.key) continue;
+    if (claim.status === "stale") continue;
+    const list = claimsByKey.get(claim.key) ?? [];
+    list.push({ id, statement: claim.statement });
+    claimsByKey.set(claim.key, list);
+  }
+  const claimConflicts = [];
+  for (const [key, list] of claimsByKey) {
+    if (list.length > 1 && new Set(list.map((c) => c.statement)).size > 1) {
+      claimConflicts.push({
+        key,
+        claims: list,
+        acknowledged: ackedKeys.has(key)
+      });
+    }
+  }
+  return { decisionConflicts, claimConflicts };
+}
+function formatConflictsTable(result) {
+  const lines = [];
+  if (result.decisionConflicts.length === 0 && result.claimConflicts.length === 0) {
+    lines.push("No conflicts found.");
+    return lines.join("\n");
+  }
+  if (result.decisionConflicts.length > 0) {
+    lines.push("Decision conflicts:");
+    for (const dc of result.decisionConflicts) {
+      const ack = dc.acknowledged ? " [acknowledged]" : "";
+      lines.push(`  key: ${dc.key}${ack}`);
+      for (const d of dc.decisions) {
+        lines.push(`    ${d.id}: ${d.title}`);
+      }
+    }
+  }
+  if (result.claimConflicts.length > 0) {
+    lines.push("Claim conflicts (possible):");
+    for (const cc of result.claimConflicts) {
+      const ack = cc.acknowledged ? " [acknowledged]" : "";
+      lines.push(`  key: ${cc.key}${ack}`);
+      for (const c of cc.claims) {
+        lines.push(`    ${c.id}: ${c.statement}`);
+      }
+    }
+  }
+  return lines.join("\n");
+}
+var init_conflicts = __esm({
+  "src/commands/conflicts.ts"() {
+    "use strict";
+    init_ledger_file();
+    init_lock();
+    init_ledger_replay();
+  }
+});
+
+// src/commands/doctor.ts
+import { readFile as readFile14, readdir as readdir5 } from "node:fs/promises";
+import path17 from "node:path";
+import * as yaml10 from "yaml";
+function parseFrontMatter8(text) {
+  const m = text.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!m) return null;
+  try {
+    return { frontMatter: yaml10.parse(m[1] ?? ""), body: m[2] ?? "" };
+  } catch {
+    return null;
+  }
+}
+async function doctor(repoRoot) {
+  const findings = [];
+  const { events, malformed } = await readLedger(repoRoot);
+  if (malformed.length > 0) {
+    for (const m of malformed) {
+      findings.push({
+        level: "error",
+        code: "E_LEDGER_MALFORMED",
+        message: `ledger.jsonl:${m.line}: malformed JSON`,
+        fix: "Edit or remove the malformed line. Run: baton doctor --fix (not implemented)"
+      });
+    }
+  }
+  let lastId = 0;
+  for (const e of events) {
+    const num = parseInt(e.id.split("-")[1] ?? "0", 10);
+    if (num <= lastId && lastId > 0) {
+      findings.push({
+        level: "error",
+        code: "E_NON_INCREASING_ID",
+        message: `ledger.jsonl: non-increasing ID ${e.id} after e-${String(lastId).padStart(6, "0")}`,
+        fix: "Run: baton doctor --fix (renumbers events after a merged branch)"
+      });
+    }
+    lastId = Math.max(lastId, num);
+  }
+  const seenIds = /* @__PURE__ */ new Set();
+  for (const e of events) {
+    if (seenIds.has(e.id)) {
+      findings.push({
+        level: "error",
+        code: "E_DUPLICATE_EVENT_ID",
+        message: `ledger.jsonl: duplicate event ID ${e.id} (union merge of diverged branches?)`,
+        fix: "Run: baton doctor --fix (renumbers events, remaps claim/run IDs)"
+      });
+    }
+    seenIds.add(e.id);
+  }
+  {
+    const seenHashes = /* @__PURE__ */ new Set();
+    for (const e of events) {
+      const prev = e.prev_hash;
+      if (prev && prev.length > 0 && !seenHashes.has(prev)) {
+        findings.push({
+          level: "error",
+          code: "E_LEDGER_CHAIN_BREAK",
+          message: `ledger.jsonl: ${e.id} references prev_hash ${prev.slice(0, 12)}... which is not any earlier entry \u2014 the referenced entry was tampered with or reordered`,
+          fix: "Run: baton doctor --fix (rebuilds the prev_hash chain; inspect the ledger history first)"
+        });
+      }
+      seenHashes.add(eventHash(e));
+    }
+  }
+  const tasksDir = path17.join(repoRoot, "project-memory/tasks");
+  let taskFiles;
+  try {
+    taskFiles = await readdir5(tasksDir);
+  } catch {
+    taskFiles = [];
+  }
+  const taskIds = /* @__PURE__ */ new Set();
+  for (const f of taskFiles) {
+    if (!f.endsWith(".md")) continue;
+    const taskId = f.replace(/\.md$/, "");
+    if (taskIds.has(taskId)) {
+      findings.push({ level: "error", code: "E_DUPLICATE_TASK_ID", message: `duplicate task ID: ${taskId}` });
+    }
+    taskIds.add(taskId);
+    const text = await readFile14(path17.join(tasksDir, f), "utf8").catch(() => "");
+    const parsed = parseFrontMatter8(text);
+    if (!parsed) {
+      findings.push({ level: "error", code: "E_UNPARSEABLE", message: `${f}: front matter parse failed` });
+    }
+  }
+  const decisionsDir = path17.join(repoRoot, "project-memory/decisions");
+  let decisionFiles;
+  try {
+    decisionFiles = await readdir5(decisionsDir);
+  } catch {
+    decisionFiles = [];
+  }
+  const decisionIds = /* @__PURE__ */ new Set();
+  for (const f of decisionFiles) {
+    if (!f.endsWith(".md")) continue;
+    const decisionId = f.replace(/\.md$/, "");
+    if (decisionIds.has(decisionId)) {
+      findings.push({ level: "error", code: "E_DUPLICATE_DECISION_ID", message: `duplicate decision ID: ${decisionId}` });
+    }
+    decisionIds.add(decisionId);
+    const text = await readFile14(path17.join(decisionsDir, f), "utf8").catch(() => "");
+    const parsed = parseFrontMatter8(text);
+    if (!parsed) {
+      findings.push({ level: "error", code: "E_UNPARSEABLE", message: `${f}: front matter parse failed` });
+    }
+  }
+  const state = replay(events);
+  let baseBranch = "main";
+  let policyRaw = null;
+  try {
+    const policyText = await readFile14(path17.join(repoRoot, ".baton/policy.yml"), "utf8");
+    policyRaw = yaml10.parse(policyText);
+    if (policyRaw?.default_branch) baseBranch = policyRaw.default_branch;
+  } catch {
+  }
+  const allowedCommands = policyRaw?.allowed_commands ?? [];
+  const sandboxMode = policyRaw?.execution?.sandbox ?? "none";
+  if (allowedCommands.length > 0 && sandboxMode !== "docker" && !process.env.CI) {
+    findings.push({
+      level: "warning",
+      code: "W_SANDBOX_NONE",
+      message: "cmd checks execute worker-written code directly on this machine (execution.sandbox: none). Set execution.sandbox: docker (no network, worktree-only mount), or run verify only inside CI on an ephemeral runner."
+    });
+  }
+  for (const [taskId, t] of state.tasks) {
+    if (!t.lockedHash) continue;
+    const taskPath = `project-memory/tasks/${taskId}.md`;
+    const exists = await fileExistsAtRef(repoRoot, baseBranch, taskPath);
+    if (!exists) {
+      findings.push({
+        level: "error",
+        code: "E_LOCK_HASH_MISMATCH",
+        message: `task ${taskId}: locked but not found on ${baseBranch}`,
+        fix: `baton task unlock ${taskId} --reason "not on base"`
+      });
+    }
+  }
+  try {
+    const wtResult = await git(["worktree", "list", "--porcelain"], { cwd: repoRoot });
+    if (wtResult.exitCode === 0) {
+      const blocks = wtResult.stdout.split("\n\n");
+      for (const block of blocks) {
+        const lines = block.split("\n").filter((l) => l.length > 0);
+        const wtLine = lines.find((l) => l.startsWith("worktree "));
+        if (!wtLine) continue;
+        const wtPath = wtLine.slice("worktree ".length);
+        if (wtPath.includes(".baton/tmp/wt-")) {
+          findings.push({
+            level: "error",
+            code: "E_STALE_WORKTREE",
+            message: `stale worktree: ${wtPath}`,
+            fix: "git worktree remove --force " + wtPath
+          });
+        }
+      }
+    }
+  } catch {
+  }
+  try {
+    const stateText = await readFile14(path17.join(repoRoot, "project-memory/STATE.md"), "utf8");
+    const lineCount = stateText.split("\n").length;
+    if (lineCount > 60) {
+      findings.push({
+        level: "warning",
+        code: "W_STATE_TOO_LONG",
+        message: `STATE.md is ${lineCount} lines (guidance: 60)`
+      });
+    }
+  } catch {
+  }
+  try {
+    const gitignore = await readFile14(path17.join(repoRoot, ".gitignore"), "utf8");
+    const required = ["project-memory/packets/", "project-memory/sessions/", ".baton/"];
+    for (const r of required) {
+      if (!gitignore.includes(r)) {
+        findings.push({ level: "warning", code: "W_MISSING_GITIGNORE", message: `.gitignore missing: ${r}` });
+      }
+    }
+  } catch {
+  }
+  const hasErrors = findings.some((f) => f.level === "error");
+  return { findings, hasErrors };
+}
+async function doctorFix(repoRoot) {
+  const { events, malformed } = await readLedger(repoRoot);
+  if (malformed.length > 0) {
+    throw new Error(
+      `cannot --fix: ledger has ${malformed.length} malformed line(s) at ` + malformed.map((m) => m.line).join(", ") + " \u2014 repair those manually first"
+    );
+  }
+  let changed = false;
+  let renumbered = 0;
+  let remappedClaims = 0;
+  let remappedRuns = 0;
+  const claimMap = /* @__PURE__ */ new Map();
+  const runMap = /* @__PURE__ */ new Map();
+  let claimNum = 0;
+  let runNum = 0;
+  const out = [];
+  const nextClaimId3 = () => `c-${String(++claimNum).padStart(4, "0")}`;
+  const nextRunId2 = () => `r-${String(++runNum).padStart(4, "0")}`;
+  for (let i = 0; i < events.length; i++) {
+    const src = events[i];
+    const e = { ...src };
+    const expected = `e-${String(i + 1).padStart(6, "0")}`;
+    if (e.id !== expected) {
+      renumbered++;
+      changed = true;
+    }
+    e.id = expected;
+    if (e.type === "claim" && typeof e.claim_id === "string") {
+      const old = e.claim_id;
+      const mapped = nextClaimId3();
+      claimMap.set(old, mapped);
+      if (mapped !== old) {
+        e.claim_id = mapped;
+        remappedClaims++;
+        changed = true;
+      }
+    } else if (e.type === "claim_status" && typeof e.claim_id === "string") {
+      const mapped = claimMap.get(e.claim_id);
+      if (mapped && mapped !== e.claim_id) {
+        e.claim_id = mapped;
+        remappedClaims++;
+        changed = true;
+      }
+    }
+    if (e.type === "verify_run" && typeof e.run_id === "string") {
+      const old = e.run_id;
+      const mapped = nextRunId2();
+      runMap.set(old, mapped);
+      if (mapped !== old) {
+        e.run_id = mapped;
+        remappedRuns++;
+        changed = true;
+      }
+    } else if ((e.type === "check_result" || e.type === "claim_status") && typeof e.run_id === "string") {
+      const mapped = runMap.get(e.run_id);
+      if (mapped && mapped !== e.run_id) {
+        e.run_id = mapped;
+        remappedRuns++;
+        changed = true;
+      }
+    }
+    out.push(e);
+  }
+  if (!changed) {
+    return { changed: false, renumbered: 0, remappedClaims: 0, remappedRuns: 0 };
+  }
+  const repaired = {
+    v: 1,
+    id: `e-${String(out.length + 1).padStart(6, "0")}`,
+    ts: (/* @__PURE__ */ new Date()).toISOString(),
+    type: "ledger_repaired",
+    renumbered_events: renumbered,
+    remapped_claims: remappedClaims,
+    remapped_runs: remappedRuns,
+    reason: "post-merge ID repair: union merge of diverged branches (baton doctor --fix)"
+  };
+  out.push(repaired);
+  await withLock(repoRoot, async () => {
+    await rewriteLedger(repoRoot, out);
+  });
+  return { changed: true, renumbered, remappedClaims, remappedRuns };
+}
+function formatDoctorOutput(result) {
+  const lines = [];
+  const errors = result.findings.filter((f) => f.level === "error");
+  const warnings = result.findings.filter((f) => f.level === "warning");
+  if (errors.length > 0) {
+    lines.push(`ERRORS (${errors.length})`);
+    for (const e of errors) {
+      lines.push(`  ${e.code}: ${e.message}`);
+      if (e.fix) lines.push(`    fix: ${e.fix}`);
+    }
+  }
+  if (warnings.length > 0) {
+    lines.push(`WARNINGS (${warnings.length})`);
+    for (const w of warnings) {
+      lines.push(`  ${w.code}: ${w.message}`);
+    }
+  }
+  if (errors.length === 0 && warnings.length === 0) {
+    lines.push("No issues found. All clear.");
+  }
+  return lines.join("\n");
+}
+var init_doctor = __esm({
+  "src/commands/doctor.ts"() {
+    "use strict";
+    init_ledger_file();
+    init_git();
+    init_ledger_replay();
+    init_git();
+    init_lock();
+  }
+});
+
+// src/commands/done.ts
+var done_exports = {};
+__export(done_exports, {
+  done: () => done,
+  formatDoneOutput: () => formatDoneOutput
+});
+import { readFile as readFile18, readdir as readdir7 } from "node:fs/promises";
+import path21 from "node:path";
+import * as yaml14 from "yaml";
+function parseFrontMatter10(text) {
+  const m = text.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!m) throw new Error("front matter not found");
+  return yaml14.parse(m[1] ?? "");
+}
+async function done(repoRoot) {
+  const gates = [];
+  const { events } = await readLedger(repoRoot);
+  const state = replay(events);
+  let taskFiles = [];
+  try {
+    taskFiles = (await readdir7(path21.join(repoRoot, "project-memory/tasks"))).filter((f) => f.endsWith(".md"));
+  } catch {
+    taskFiles = [];
+  }
+  const offenders = [];
+  for (const f of taskFiles) {
+    const taskId = f.replace(/\.md$/, "");
+    const t = state.tasks.get(taskId);
+    if (!t) {
+      offenders.push(`${taskId} (draft \u2014 never locked)`);
+      continue;
+    }
+    if (t.status === "done") continue;
+    if (t.status === "rejected" && t.followUpTask) {
+      const fu = state.tasks.get(t.followUpTask);
+      if (fu?.status === "done") continue;
+      offenders.push(`${taskId} (rejected, follow-up ${t.followUpTask} not done${t.escalated ? ", ESCALATED" : ""})`);
+      continue;
+    }
+    offenders.push(`${taskId} (${t.status}${t.escalated ? ", ESCALATED" : ""})`);
+  }
+  for (const [taskId, t] of state.tasks) {
+    if (!taskFiles.includes(`${taskId}.md`)) {
+      offenders.push(`${taskId} (${t.status}, task file missing)`);
+    }
+  }
+  gates.push({
+    id: "G1",
+    label: "All tasks done",
+    pass: offenders.length === 0 && taskFiles.length > 0,
+    detail: offenders.length === 0 ? `${taskFiles.length} task(s), all done` : offenders.join("; ")
+  });
+  const staleResult = await stale(repoRoot, { dryRun: true });
+  gates.push({
+    id: "G2",
+    label: "Zero stale verified claims",
+    pass: staleResult.staleClaims.length === 0,
+    detail: `${staleResult.totalChecked} checked, ${staleResult.staleClaims.length} stale`
+  });
+  const conflictResult = await conflicts(repoRoot, {});
+  const unresolved = [
+    ...conflictResult.decisionConflicts.filter((c) => !c.acknowledged),
+    ...conflictResult.claimConflicts.filter((c) => !c.acknowledged)
+  ];
+  gates.push({
+    id: "G3",
+    label: "Zero unacknowledged conflicts",
+    pass: unresolved.length === 0,
+    detail: unresolved.length === 0 ? "no conflicts" : unresolved.map((c) => c.key).join(", ")
+  });
+  const doctorResult = await doctor(repoRoot);
+  const doctorErrors = doctorResult.findings.filter((f) => f.level === "error");
+  gates.push({
+    id: "G4",
+    label: "doctor reports no errors",
+    pass: !doctorResult.hasErrors,
+    detail: doctorErrors.length === 0 ? `${doctorResult.findings.filter((f) => f.level === "warning").length} warning(s)` : doctorErrors.map((e) => `${e.code}: ${e.message}`).join("; ").slice(0, 300)
+  });
+  let decisionFiles = [];
+  try {
+    decisionFiles = (await readdir7(path21.join(repoRoot, "project-memory/decisions"))).filter((f) => f.endsWith(".md"));
+  } catch {
+    decisionFiles = [];
+  }
+  const proposed = [];
+  for (const f of decisionFiles) {
+    try {
+      const text = await readFile18(path21.join(repoRoot, "project-memory/decisions", f), "utf8");
+      const fm = parseFrontMatter10(text);
+      if (fm.status === "proposed") proposed.push(String(fm.id ?? f));
+    } catch {
+    }
+  }
+  gates.push({
+    id: "G5",
+    label: "No decisions left proposed",
+    pass: proposed.length === 0,
+    detail: proposed.length === 0 ? `${decisionFiles.length} decision(s) resolved` : proposed.join(", ")
+  });
+  let stateMd = "";
+  try {
+    stateMd = await readFile18(path21.join(repoRoot, "project-memory/STATE.md"), "utf8");
+  } catch {
+  }
+  const stateLines = stateMd ? stateMd.split("\n").length : 0;
+  gates.push({
+    id: "G6",
+    label: "STATE.md present and <= 60 lines",
+    pass: stateLines > 0 && stateLines <= 60,
+    detail: stateLines === 0 ? "STATE.md missing" : `${stateLines} lines`
+  });
+  const escalatedTasks = [];
+  for (const [taskId, t] of state.tasks) {
+    if (t.escalated) escalatedTasks.push(taskId);
+  }
+  gates.push({
+    id: "G7",
+    label: "No escalated tasks (2+ rejections) awaiting review",
+    pass: escalatedTasks.length === 0,
+    detail: escalatedTasks.length === 0 ? "no escalated tasks" : `${escalatedTasks.sort().join(", ")} \u2014 human decision required`
+  });
+  return { done: gates.every((g) => g.pass), gates };
+}
+function formatDoneOutput(result) {
+  const lines = [];
+  lines.push(result.done ? "BATON: DONE" : "BATON: NOT DONE");
+  lines.push("");
+  for (const g of result.gates) {
+    lines.push(`  [${g.pass ? "PASS" : "FAIL"}] ${g.id} ${g.label}`);
+    lines.push(`         ${g.detail}`);
+  }
+  if (!result.done) {
+    lines.push("");
+    lines.push("Complete the failing gates, then re-run baton done.");
+  }
+  return lines.join("\n");
+}
+var init_done = __esm({
+  "src/commands/done.ts"() {
+    "use strict";
+    init_ledger_file();
+    init_ledger_replay();
+    init_doctor();
+    init_stale();
+    init_conflicts();
+  }
+});
 
 // src/cli.ts
 import { Command } from "commander";
 
 // src/commands/init.ts
 import { mkdir, writeFile, readFile, access } from "node:fs/promises";
-import path from "node:path";
+import path2 from "node:path";
 
 // src/templates/index.ts
 var STATE_TEMPLATE = `# Project State
@@ -166,8 +1395,32 @@ execution:
   acknowledged: false
   timeout_seconds: 300
   docker_image: ""
+  # v1.3.2: none = cmd checks run directly on this machine (per-run HOME/TMPDIR
+  # isolation). docker = no-network container, worktree is the only visible path
+  # (requires docker_image). doctor warns when none is used outside CI.
+  sandbox: none
 allowed_commands: []
 env_passthrough: []
+# v1.3.1: files the worker is judged by. If a worker edits these and the task
+# does not set allow_protected, verify restores the merge-base versions before
+# running checks and fails the protected_paths row. Set to [] to disable.
+# v1.3.2: also covers the files that define how tests run. For package.json
+# only changes to the scripts block count as protected (dependency edits stay
+# allowed).
+protected_paths:
+  - "test/**"
+  - "tests/**"
+  - "**/*.test.*"
+  - "**/*.spec.*"
+  - "package.json"
+  - "vitest.config.*"
+  - "jest.config.*"
+  - "playwright.config.*"
+  - "pytest.ini"
+  - "conftest.py"
+  - "tox.ini"
+  - "tsconfig*.json"
+  - "Makefile"
 never_include:
   - ".env*"
   - "**/.env.*"
@@ -198,6 +1451,7 @@ var GITATTRIBUTES_LINES = `project-memory/ledger.jsonl merge=union
 `;
 
 // src/commands/init.ts
+init_git();
 var REQUIRED_DIRS = [
   "project-memory",
   "project-memory/decisions",
@@ -247,7 +1501,7 @@ async function init(repoRoot, opts = {}) {
   const created = [];
   const skipped = [];
   for (const dir of REQUIRED_DIRS) {
-    const full = path.join(repoRoot, dir);
+    const full = path2.join(repoRoot, dir);
     try {
       await mkdir(full, { recursive: true });
       created.push(dir + "/");
@@ -255,35 +1509,35 @@ async function init(repoRoot, opts = {}) {
       skipped.push(dir + "/");
     }
   }
-  const statePath = path.join(repoRoot, "project-memory/STATE.md");
+  const statePath = path2.join(repoRoot, "project-memory/STATE.md");
   if (!await fileExists(statePath)) {
     await writeFile(statePath, STATE_TEMPLATE, "utf8");
     created.push("project-memory/STATE.md");
   } else {
     skipped.push("project-memory/STATE.md");
   }
-  const constraintsPath = path.join(repoRoot, "project-memory/CONSTRAINTS.md");
+  const constraintsPath = path2.join(repoRoot, "project-memory/CONSTRAINTS.md");
   if (!await fileExists(constraintsPath)) {
     await writeFile(constraintsPath, CONSTRAINTS_TEMPLATE, "utf8");
     created.push("project-memory/CONSTRAINTS.md");
   } else {
     skipped.push("project-memory/CONSTRAINTS.md");
   }
-  const ledgerPath = path.join(repoRoot, "project-memory/ledger.jsonl");
+  const ledgerPath = path2.join(repoRoot, "project-memory/ledger.jsonl");
   if (!await fileExists(ledgerPath)) {
     await writeFile(ledgerPath, "", "utf8");
     created.push("project-memory/ledger.jsonl");
   } else {
     skipped.push("project-memory/ledger.jsonl");
   }
-  const policyPath = path.join(repoRoot, ".baton/policy.yml");
+  const policyPath = path2.join(repoRoot, ".baton/policy.yml");
   if (!await fileExists(policyPath)) {
     await writeFile(policyPath, DEFAULT_POLICY, "utf8");
     created.push(".baton/policy.yml");
   } else {
     skipped.push(".baton/policy.yml");
   }
-  const gitignorePath = path.join(repoRoot, ".gitignore");
+  const gitignorePath = path2.join(repoRoot, ".gitignore");
   let gitignoreContent = "";
   if (await fileExists(gitignorePath)) {
     gitignoreContent = await readFile(gitignorePath, "utf8");
@@ -296,7 +1550,7 @@ async function init(repoRoot, opts = {}) {
   } else {
     skipped.push(".gitignore");
   }
-  const gitattributesPath = path.join(repoRoot, ".gitattributes");
+  const gitattributesPath = path2.join(repoRoot, ".gitattributes");
   let gitattributesContent = "";
   if (await fileExists(gitattributesPath)) {
     gitattributesContent = await readFile(gitattributesPath, "utf8");
@@ -311,12 +1565,12 @@ async function init(repoRoot, opts = {}) {
   }
   const pointers = [];
   for (const f of POINTER_FILES) {
-    const action = await appendPointerBlock(path.join(repoRoot, f));
+    const action = await appendPointerBlock(path2.join(repoRoot, f));
     pointers.push({ file: f, action });
   }
   if (opts.rulesFile) {
-    const rulesPath = path.isAbsolute(opts.rulesFile) ? opts.rulesFile : path.join(repoRoot, opts.rulesFile);
-    await mkdir(path.dirname(rulesPath), { recursive: true });
+    const rulesPath = path2.isAbsolute(opts.rulesFile) ? opts.rulesFile : path2.join(repoRoot, opts.rulesFile);
+    await mkdir(path2.dirname(rulesPath), { recursive: true });
     const action = await appendPointerBlock(rulesPath);
     pointers.push({ file: opts.rulesFile, action });
   }
@@ -325,8 +1579,8 @@ async function init(repoRoot, opts = {}) {
 }
 
 // src/commands/decide.ts
-import { readFile as readFile2, writeFile as writeFile2, readdir } from "node:fs/promises";
-import path2 from "node:path";
+import { readFile as readFile3, writeFile as writeFile3, readdir } from "node:fs/promises";
+import path5 from "node:path";
 import * as yaml from "yaml";
 
 // src/core/schemas.ts
@@ -336,7 +1590,10 @@ var CheckSchema = z.discriminatedUnion("type", [
     id: z.string().min(1).max(60),
     description: z.string().min(1).max(120).optional(),
     type: z.literal("cmd"),
-    run: z.string().min(1),
+    // v1.3.2: string form (split on whitespace, for simple commands) or argv
+    // array (tokens passed verbatim, so quoted arguments like -t "a b"
+    // survive). shell stays false in both cases.
+    run: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]),
     covers: z.array(z.string()).optional(),
     watch: z.array(z.string()).optional()
   }),
@@ -390,6 +1647,10 @@ var TaskSchema = z.object({
   reads: z.array(z.string()).optional(),
   decisions: z.array(z.string().regex(/^D-\d{4}$/)).optional(),
   non_goals: z.array(z.string()).optional(),
+  // v1.3.1: set on the task when the worker is explicitly allowed to edit
+  // protected paths (e.g. the task legitimately updates tests). Written by
+  // `baton task new --allow-protected`; verified as part of the locked hash.
+  allow_protected: z.boolean().optional(),
   checks: z.array(CheckSchema).min(1)
 }).strict().superRefine((t, ctx) => {
   for (const g of t.touches) {
@@ -409,7 +1670,7 @@ var TaskSchema = z.object({
     }
   }
   for (const c of t.checks) {
-    if (c.type === "cmd") {
+    if (c.type === "cmd" && typeof c.run === "string") {
       if (/[;&|<>`$()\n]/.test(c.run)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -459,7 +1720,11 @@ var PolicySchema = z.object({
     mode: z.enum(["local", "docker"]).default("local"),
     acknowledged: z.boolean().default(false),
     timeout_seconds: z.number().int().positive().default(300),
-    docker_image: z.string().default("")
+    docker_image: z.string().default(""),
+    // v1.3.2: none (default) = run directly on this machine (per-run HOME/TMPDIR
+    // isolation only). docker = wrap cmd checks in a no-network container whose
+    // only mounted path is the worktree. doctor warns when none is used outside CI.
+    sandbox: z.enum(["none", "docker"]).default("none")
   }).default({}),
   allowed_commands: z.array(z.string()).default([]),
   env_passthrough: z.array(z.string()).default([]),
@@ -482,12 +1747,37 @@ var PolicySchema = z.object({
     regex: z.string()
   })).default([]),
   // v1.3: retrieved-context tier size in packets. 0 disables the tier.
-  retrieval_snippets: z.number().int().min(0).max(20).default(6)
+  retrieval_snippets: z.number().int().min(0).max(20).default(6),
+  // v1.3.1: files the worker is judged by. If a worker edits these and the task
+  // does not set allow_protected, verify restores the merge-base versions before
+  // running checks and fails a protected_paths row. Set [] to disable.
+  // v1.3.2: also protects the files that define HOW tests run. Special case:
+  // for package.json only changes to the `scripts` block count as protected —
+  // dependency edits stay allowed.
+  protected_paths: z.array(z.string()).default([
+    "test/**",
+    "tests/**",
+    "**/*.test.*",
+    "**/*.spec.*",
+    "package.json",
+    "vitest.config.*",
+    "jest.config.*",
+    "playwright.config.*",
+    "pytest.ini",
+    "conftest.py",
+    "tox.ini",
+    "tsconfig*.json",
+    "Makefile"
+  ])
 }).strict();
 var baseEvent = z.object({
   v: z.literal(1),
   id: z.string().regex(/^e-\d{6}$/),
-  ts: z.string()
+  ts: z.string(),
+  // v1.3.2 P3: tamper-evidence. prev_hash = computed hash of the entry this
+  // one was appended after ('' for the very first entry). Optional so legacy
+  // (pre-v1.3.2) ledgers still type-check; doctor verifies when present.
+  prev_hash: z.string().optional()
 });
 var LedgerEventSchema = z.discriminatedUnion("type", [
   baseEvent.extend({
@@ -621,17 +1911,25 @@ var LedgerEventSchema = z.discriminatedUnion("type", [
     type: z.literal("lease_released"),
     task: z.string().regex(/^T-\d{4}$/),
     reason: z.string()
+  }),
+  baseEvent.extend({
+    // v1.3.1: written by `baton doctor --fix` after a union merge of two
+    // branches that both appended ledger events. Records what was repaired.
+    type: z.literal("ledger_repaired"),
+    renumbered_events: z.number().int().min(0),
+    remapped_claims: z.number().int().min(0),
+    remapped_runs: z.number().int().min(0),
+    reason: z.string()
   })
 ]);
 
-// src/io/hash.ts
-import { createHash } from "node:crypto";
-function sha256Sync(bytes) {
-  const input = typeof bytes === "string" ? Buffer.from(bytes, "utf8") : Buffer.from(bytes);
-  return createHash("sha256").update(input).digest("hex");
-}
+// src/commands/decide.ts
+init_lock();
+init_hash();
+init_ledger_file();
 
 // src/io/branch-guard.ts
+init_git();
 async function getCurrentBranch(repoRoot) {
   const r = await git(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoRoot });
   if (r.exitCode !== 0) return null;
@@ -677,7 +1975,7 @@ ${fmText}
 ${body}`;
 }
 async function listDecisionIds(repoRoot) {
-  const dir = path2.join(repoRoot, "project-memory/decisions");
+  const dir = path5.join(repoRoot, "project-memory/decisions");
   let files;
   try {
     files = await readdir(dir);
@@ -714,8 +2012,8 @@ ${opts.why ?? ""}
 ${opts.alternatives ?? ""}
 `;
     const content = stringifyFrontMatter(fm, body);
-    const filePath = path2.join(repoRoot, "project-memory/decisions", `${id}.md`);
-    await writeFile2(filePath, content, "utf8");
+    const filePath = path5.join(repoRoot, "project-memory/decisions", `${id}.md`);
+    await writeFile3(filePath, content, "utf8");
     const hash = sha256Sync(content);
     const eventId = await nextEventId(repoRoot);
     await appendLedger(repoRoot, {
@@ -734,10 +2032,10 @@ ${opts.alternatives ?? ""}
 async function decideAccept(repoRoot, decisionId, opts = {}) {
   await assertOnBaseBranch(repoRoot, opts.baseBranch ?? "main", { allowBranch: opts.allowBranch });
   return withLock(repoRoot, async () => {
-    const filePath = path2.join(repoRoot, "project-memory/decisions", `${decisionId}.md`);
+    const filePath = path5.join(repoRoot, "project-memory/decisions", `${decisionId}.md`);
     let text;
     try {
-      text = await readFile2(filePath, "utf8");
+      text = await readFile3(filePath, "utf8");
     } catch {
       const err = new Error(`decision not found: ${decisionId}`);
       err.exitCode = 3;
@@ -767,7 +2065,7 @@ async function decideAccept(repoRoot, decisionId, opts = {}) {
     }
     const updatedFm = { ...frontMatter, status: "accepted" };
     const updatedText = stringifyFrontMatter(updatedFm, body);
-    await writeFile2(filePath, updatedText, "utf8");
+    await writeFile3(filePath, updatedText, "utf8");
     const newHash = sha256Sync(updatedText);
     const eventId = await nextEventId(repoRoot);
     await appendLedger(repoRoot, {
@@ -781,13 +2079,13 @@ async function decideAccept(repoRoot, decisionId, opts = {}) {
       hash: newHash
     });
     if (opts.supersedes) {
-      const oldFilePath = path2.join(repoRoot, "project-memory/decisions", `${opts.supersedes}.md`);
+      const oldFilePath = path5.join(repoRoot, "project-memory/decisions", `${opts.supersedes}.md`);
       try {
-        const oldText = await readFile2(oldFilePath, "utf8");
+        const oldText = await readFile3(oldFilePath, "utf8");
         const { frontMatter: oldFm, body: oldBody } = parseFrontMatter(oldText);
         const updatedOldFm = { ...oldFm, status: "superseded", supersedes: void 0 };
         const updatedOldText = stringifyFrontMatter(updatedOldFm, oldBody);
-        await writeFile2(oldFilePath, updatedOldText, "utf8");
+        await writeFile3(oldFilePath, updatedOldText, "utf8");
         const oldHash = sha256Sync(updatedOldText);
         const oldEventId = await nextEventId(repoRoot);
         await appendLedger(repoRoot, {
@@ -808,10 +2106,10 @@ async function decideAccept(repoRoot, decisionId, opts = {}) {
 async function decideReject(repoRoot, decisionId, opts = {}) {
   await assertOnBaseBranch(repoRoot, opts.baseBranch ?? "main", { allowBranch: opts.allowBranch });
   return withLock(repoRoot, async () => {
-    const filePath = path2.join(repoRoot, "project-memory/decisions", `${decisionId}.md`);
+    const filePath = path5.join(repoRoot, "project-memory/decisions", `${decisionId}.md`);
     let text;
     try {
-      text = await readFile2(filePath, "utf8");
+      text = await readFile3(filePath, "utf8");
     } catch {
       const err = new Error(`decision not found: ${decisionId}`);
       err.exitCode = 3;
@@ -820,7 +2118,7 @@ async function decideReject(repoRoot, decisionId, opts = {}) {
     const { frontMatter, body } = parseFrontMatter(text);
     const updatedFm = { ...frontMatter, status: "rejected" };
     const updatedText = stringifyFrontMatter(updatedFm, body);
-    await writeFile2(filePath, updatedText, "utf8");
+    await writeFile3(filePath, updatedText, "utf8");
     const newHash = sha256Sync(updatedText);
     const eventId = await nextEventId(repoRoot);
     await appendLedger(repoRoot, {
@@ -837,9 +2135,739 @@ async function decideReject(repoRoot, decisionId, opts = {}) {
 }
 
 // src/commands/task.ts
-import { readFile as readFile3, writeFile as writeFile3, readdir as readdir2 } from "node:fs/promises";
-import path3 from "node:path";
+import { readFile as readFile5, writeFile as writeFile5, readdir as readdir2 } from "node:fs/promises";
+import path8 from "node:path";
 import * as yaml2 from "yaml";
+
+// src/core/check-engine.ts
+import { readFile as readFile4, writeFile as writeFile4, mkdir as mkdir3, rm } from "node:fs/promises";
+import path7 from "node:path";
+
+// src/core/secrets.ts
+var SECRET_PATTERNS = [
+  { name: "aws", regex: /AKIA[0-9A-Z]{16}/g },
+  { name: "github", regex: /gh[pousr]_[A-Za-z0-9]{36,}/g },
+  { name: "slack", regex: /xox[baprs]-[A-Za-z0-9-]{10,}/g },
+  { name: "stripe", regex: /sk_live_[A-Za-z0-9]{16,}/g },
+  // v1.3.2: sk- prefixed keys (OpenAI sk-proj-…, Anthropic sk-ant-…). Does not
+  // collide with stripe's sk_live_ (underscore, not hyphen).
+  { name: "openai_style", regex: /sk-[A-Za-z0-9_-]{20,}/g },
+  // v1.3.2: Google API keys are exactly AIza + 35 chars.
+  { name: "google_api_key", regex: /AIza[0-9A-Za-z_-]{35}/g },
+  // v1.3.2: JWT — two base64url segments starting eyJ (header.payload) plus a
+  // signature segment of at least 10 chars.
+  { name: "jwt", regex: /eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{10,}/g },
+  // v1.3.2: any scheme://user:password@ URL (postgresql, mysql, redis, ...).
+  // Password must be 6+ chars without whitespace or @ or /.
+  { name: "url_credentials", regex: /[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]{6,}@/g },
+  // v1.3.2: unquoted .env-style assignment of a secret-looking variable.
+  // Case-insensitive so `password = hunter2…` is caught too. Requires a value
+  // of 12+ non-space chars to avoid tripping on short config values.
+  { name: "env_assignment", regex: /^[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*\s*=\s*\S{12,}/gi },
+  { name: "private_key", regex: /-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/g },
+  { name: "generic", regex: /(?:api[_-]?key|secret|token|password)\s*[:=]\s*["'][^"']{12,}["']/gi }
+];
+function isPlaceholder(value) {
+  const lower = value.toLowerCase();
+  if (lower.includes("example") || lower.includes("changeme") || lower.includes("your_") || lower.includes("xxxx")) return true;
+  if (/<[^>]{0,60}>/.test(value)) return true;
+  return false;
+}
+function mask(value) {
+  if (value.length < 8) return "****";
+  return value.slice(0, 4) + "****" + value.slice(-4);
+}
+function scan(text, extra = []) {
+  const all = [...SECRET_PATTERNS];
+  for (const e of extra) {
+    try {
+      all.push({ name: e.name, regex: new RegExp(e.regex, "g") });
+    } catch {
+    }
+  }
+  const findings = [];
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    for (const p of all) {
+      p.regex.lastIndex = 0;
+      const m = line.match(p.regex);
+      if (m && m.length > 0) {
+        for (const match of m) {
+          if (isPlaceholder(match)) continue;
+          findings.push({ line: i + 1, masked: mask(match), name: p.name });
+        }
+      }
+    }
+  }
+  return findings;
+}
+
+// src/core/check-engine.ts
+init_globs();
+
+// src/io/run-process.ts
+import { spawn as spawn2, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path6 from "node:path";
+var MAX_OUTPUT = 10 * 1024 * 1024;
+function killProcessTree(pid) {
+  if (process.platform === "win32") {
+    try {
+      spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
+    } catch {
+    }
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+    }
+  }
+}
+function run(argv, opts) {
+  const timeoutMs = opts.timeoutMs ?? 3e5;
+  const timeoutSeconds = Math.round(timeoutMs / 1e3);
+  const start = Date.now();
+  const sandboxHome = mkdtempSync(path6.join(tmpdir(), "baton-run-"));
+  const passthrough = /* @__PURE__ */ new Set([
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "CI",
+    ...opts.envPassthrough ?? []
+  ]);
+  const childEnv = {};
+  for (const [k, v] of Object.entries(opts.env ?? process.env)) {
+    if (v === void 0) continue;
+    if (passthrough.has(k)) {
+      childEnv[k] = v;
+      continue;
+    }
+    if (/TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL/i.test(k)) {
+      continue;
+    }
+  }
+  childEnv["HOME"] = sandboxHome;
+  childEnv["USERPROFILE"] = sandboxHome;
+  childEnv["TMPDIR"] = sandboxHome;
+  childEnv["TEMP"] = sandboxHome;
+  childEnv["TMP"] = sandboxHome;
+  const cleanup = () => {
+    try {
+      rmSync(sandboxHome, { recursive: true, force: true });
+    } catch {
+    }
+  };
+  return new Promise((resolve) => {
+    const p = spawn2(argv[0] ?? "", argv.slice(1), {
+      cwd: opts.cwd,
+      shell: false,
+      env: childEnv,
+      detached: true
+      // v1.2 G22: new process group for tree kill
+    });
+    let stdout = "";
+    let stderr = "";
+    let truncated = false;
+    let timedOut = false;
+    let timeoutHandle = null;
+    let resolved = false;
+    const finish = (code) => {
+      if (resolved) return;
+      resolved = true;
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      cleanup();
+      resolve({
+        code,
+        stdout,
+        stderr,
+        truncated,
+        timedOut,
+        timeoutSeconds,
+        durationMs: Date.now() - start
+      });
+    };
+    p.stdout?.on("data", (d) => {
+      if (stdout.length < MAX_OUTPUT) stdout += d.toString();
+      else truncated = true;
+    });
+    p.stderr?.on("data", (d) => {
+      if (stderr.length < MAX_OUTPUT) stderr += d.toString();
+      else truncated = true;
+    });
+    p.on("error", () => {
+      finish(1);
+    });
+    p.on("close", (code) => {
+      finish(code);
+    });
+    timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      if (p.pid) killProcessTree(p.pid);
+      setTimeout(() => finish(null), 100);
+    }, timeoutMs);
+  });
+}
+
+// src/core/check-engine.ts
+init_git();
+init_hash();
+var ALWAYS_DENIED = [
+  ".baton/**",
+  "project-memory/tasks/**",
+  "project-memory/decisions/**",
+  "project-memory/ledger.jsonl",
+  ".github/workflows/**",
+  // Build artifacts — not source code, should never trip scope
+  "node_modules/**",
+  "dist/**",
+  ".vite/**",
+  "**/.vite/**"
+];
+function pathAllowed(p, allow) {
+  return allow.some((g) => isMatch(p, g));
+}
+async function runDiffScope(ctx, check) {
+  try {
+    const changes = await diffNameStatus(ctx.repoRoot, ctx.baseCommit, ctx.headCommit);
+    const violations = [];
+    for (const change of changes) {
+      if (change.path.match(/^project-memory\/reports\/R-\d+\.md$/)) continue;
+      const isDenied = ALWAYS_DENIED.some((g) => isMatch(change.path, g));
+      if (isDenied) {
+        if (!pathAllowed(change.path, check.allow)) {
+          violations.push(`${change.path} (${change.status}) [denied path not in allow]`);
+        }
+      } else {
+        if (!pathAllowed(change.path, check.allow)) {
+          violations.push(`${change.path} (${change.status}) [outside scope]`);
+        }
+      }
+    }
+    if (violations.length > 0) {
+      return {
+        id: check.id,
+        type: check.type,
+        description: check.description,
+        result: "fail",
+        reason: `${violations.length} file(s) outside allow: ${violations.slice(0, 5).join(", ")}${violations.length > 5 ? "..." : ""}`
+      };
+    }
+    return {
+      id: check.id,
+      type: check.type,
+      description: check.description,
+      result: "pass",
+      anchor: { commit: ctx.headCommit, watch: ctx.taskTouches }
+    };
+  } catch (err) {
+    return {
+      id: check.id,
+      type: check.type,
+      description: check.description,
+      result: "fail",
+      reason: `diff_scope error: ${err.message}`
+    };
+  }
+}
+function sanitize(text) {
+  return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "").replace(/\r/g, "");
+}
+function lastNLines(text, n) {
+  const lines = sanitize(text).split("\n").filter((l) => l.length > 0);
+  return lines.slice(-n).join("\n");
+}
+function dockerWrap(argv, worktree, image) {
+  return [
+    "docker",
+    "run",
+    "--rm",
+    "--network=none",
+    "-v",
+    `${worktree}:${worktree}`,
+    "-w",
+    worktree,
+    image,
+    ...argv
+  ];
+}
+function packageJsonScriptsChanged(baseText, headText) {
+  const parseScripts = (text) => {
+    try {
+      const parsed = JSON.parse(text);
+      return parsed.scripts ?? null;
+    } catch {
+      return null;
+    }
+  };
+  const baseScripts = parseScripts(baseText);
+  const headScripts = parseScripts(headText);
+  if (baseScripts === null && headScripts === null) return false;
+  if (baseScripts === null || headScripts === null) return true;
+  const baseKeys = Object.keys(baseScripts).sort();
+  const headKeys = Object.keys(headScripts).sort();
+  if (baseKeys.length !== headKeys.length) return true;
+  for (let i = 0; i < baseKeys.length; i++) {
+    const bk = baseKeys[i], hk = headKeys[i];
+    if (bk !== hk) return true;
+    if (baseScripts[bk] !== headScripts[hk]) return true;
+  }
+  return false;
+}
+function commandAllowed(argv, allowed) {
+  const argvLine = argv.join(" ");
+  for (const a of allowed) {
+    if (a.endsWith(" *")) {
+      const entryTokens = a.slice(0, -2).trim().split(/\s+/).filter(Boolean);
+      if (entryTokens.length === 0) continue;
+      if (argv.length >= entryTokens.length && entryTokens.every((t, i) => argv[i] === t)) {
+        return a;
+      }
+    } else if (a === argvLine) {
+      return a;
+    }
+  }
+  return null;
+}
+async function runCmd(ctx, check) {
+  const argv = Array.isArray(check.run) ? [...check.run] : check.run.split(/\s+/).filter(Boolean);
+  const runLabel = Array.isArray(check.run) ? JSON.stringify(check.run) : check.run;
+  const allowEntry = commandAllowed(argv, ctx.policy.allowed_commands);
+  if (!allowEntry) {
+    return {
+      id: check.id,
+      type: check.type,
+      description: check.description,
+      result: "fail",
+      reason: `command not on allowlist: ${runLabel}. Add to .baton/policy.yml allowed_commands.`
+    };
+  }
+  if (allowEntry.endsWith(" *") && !Array.isArray(check.run)) {
+    const suffix = check.run.slice(allowEntry.length - 2);
+    if (/[;&|<>`$()\n]/.test(suffix)) {
+      return {
+        id: check.id,
+        type: check.type,
+        description: check.description,
+        result: "fail",
+        reason: `command arguments contain forbidden characters`
+      };
+    }
+  }
+  let execArgv = argv;
+  if (ctx.policy.execution.sandbox === "docker") {
+    const image = ctx.policy.execution.docker_image;
+    if (!image) {
+      return {
+        id: check.id,
+        type: check.type,
+        description: check.description,
+        result: "fail",
+        reason: "execution.sandbox is docker but execution.docker_image is empty. Set docker_image in .baton/policy.yml."
+      };
+    }
+    execArgv = dockerWrap(argv, ctx.worktreePath, image);
+  }
+  const result = await run(execArgv, {
+    cwd: ctx.worktreePath,
+    timeoutMs: ctx.policy.execution.timeout_seconds * 1e3,
+    envPassthrough: ctx.policy.env_passthrough
+  });
+  const logDir = path7.join(ctx.repoRoot, ".baton", "runs", ctx.runId);
+  await mkdir3(logDir, { recursive: true });
+  const logPath = path7.join(logDir, `${check.id}.log`);
+  const logContent = `=== CMD: ${runLabel} ===
+=== EXIT: ${result.code} ===
+=== TIMEOUT: ${result.timedOut} ===
+=== DURATION: ${result.durationMs}ms ===
+
+--- STDOUT ---
+${result.stdout}
+--- STDERR ---
+${result.stderr}
+`;
+  await writeFile4(logPath, logContent, "utf8");
+  const logSha = sha256Sync(logContent);
+  const logMeta = { path: `.baton/runs/${ctx.runId}/${check.id}.log`, sha256: logSha };
+  if (result.timedOut) {
+    return {
+      id: check.id,
+      type: check.type,
+      description: check.description,
+      result: "fail",
+      reason: `timed out after ${result.timeoutSeconds}s. Last 20 lines:
+${lastNLines(result.stderr || result.stdout, 20)}`,
+      log: logMeta
+    };
+  }
+  if (result.code !== 0) {
+    return {
+      id: check.id,
+      type: check.type,
+      description: check.description,
+      result: "fail",
+      reason: `exit ${result.code}. Last 20 lines:
+${lastNLines(result.stderr || result.stdout, 20)}`,
+      log: logMeta
+    };
+  }
+  return {
+    id: check.id,
+    type: check.type,
+    description: check.description,
+    result: "pass",
+    anchor: check.watch ? { commit: ctx.headCommit, watch: check.watch } : void 0,
+    log: logMeta
+  };
+}
+async function runGrep(ctx, check) {
+  try {
+    const filePath = path7.join(ctx.worktreePath, check.file);
+    const content = await readFile4(filePath, "utf8").catch(() => null);
+    if (content === null) {
+      return {
+        id: check.id,
+        type: check.type,
+        description: check.description,
+        result: "fail",
+        reason: `file not found: ${check.file}`
+      };
+    }
+    if (content.length > 1e6) {
+      return {
+        id: check.id,
+        type: check.type,
+        description: check.description,
+        result: "fail",
+        reason: `file exceeds 1MB: ${check.file}`
+      };
+    }
+    const regex = new RegExp(check.pattern);
+    const matches = regex.test(content);
+    const mode = check.mode ?? "must_match";
+    const pass = mode === "must_match" ? matches : !matches;
+    return {
+      id: check.id,
+      type: check.type,
+      description: check.description,
+      result: pass ? "pass" : "fail",
+      reason: pass ? void 0 : `${mode} failed for pattern /${check.pattern}/ in ${check.file}`,
+      anchor: check.watch ? { commit: ctx.headCommit, watch: check.watch } : void 0
+    };
+  } catch (err) {
+    return {
+      id: check.id,
+      type: check.type,
+      description: check.description,
+      result: "fail",
+      reason: `grep error: ${err.message}`
+    };
+  }
+}
+async function runFileExists(ctx, check) {
+  try {
+    const filePath = path7.join(ctx.worktreePath, check.path);
+    const exists = check.exists ?? true;
+    let fileExists2 = false;
+    try {
+      await readFile4(filePath);
+      fileExists2 = true;
+    } catch {
+    }
+    const pass = exists === fileExists2;
+    return {
+      id: check.id,
+      type: check.type,
+      description: check.description,
+      result: pass ? "pass" : "fail",
+      reason: pass ? void 0 : `expected ${check.path} to ${exists ? "exist" : "not exist"}`,
+      anchor: check.watch ? { commit: ctx.headCommit, watch: check.watch } : void 0
+    };
+  } catch (err) {
+    return {
+      id: check.id,
+      type: check.type,
+      description: check.description,
+      result: "fail",
+      reason: `file_exists error: ${err.message}`
+    };
+  }
+}
+async function runContract(ctx, check) {
+  try {
+    const filePath = path7.join(ctx.worktreePath, check.file);
+    const content = await readFile4(filePath, "utf8").catch(() => null);
+    if (content === null) {
+      return {
+        id: check.id,
+        type: check.type,
+        description: check.description,
+        result: "fail",
+        reason: `contract file not found: ${check.file}`
+      };
+    }
+    const ext = path7.extname(check.file).toLowerCase();
+    try {
+      if (ext === ".json") JSON.parse(content);
+      else if (ext === ".yaml" || ext === ".yml") {
+        const yaml17 = await import("yaml");
+        yaml17.parse(content);
+      }
+    } catch (err) {
+      return {
+        id: check.id,
+        type: check.type,
+        description: check.description,
+        result: "fail",
+        reason: `parse failed: ${err.message}`
+      };
+    }
+    if (check.expect && check.expect !== "either") {
+      const changedFiles = await diffNameOnly(ctx.repoRoot, ctx.baseCommit, ctx.headCommit);
+      const isChanged = changedFiles.includes(check.file);
+      if (check.expect === "changed" && !isChanged) {
+        return {
+          id: check.id,
+          type: check.type,
+          description: check.description,
+          result: "fail",
+          reason: `expected ${check.file} to be changed but it wasn't`
+        };
+      }
+      if (check.expect === "unchanged" && isChanged) {
+        return {
+          id: check.id,
+          type: check.type,
+          description: check.description,
+          result: "fail",
+          reason: `expected ${check.file} to be unchanged but it was modified`
+        };
+      }
+    }
+    return {
+      id: check.id,
+      type: check.type,
+      description: check.description,
+      result: "pass",
+      anchor: check.watch ? { commit: ctx.headCommit, watch: check.watch } : void 0
+    };
+  } catch (err) {
+    return {
+      id: check.id,
+      type: check.type,
+      description: check.description,
+      result: "fail",
+      reason: `contract error: ${err.message}`
+    };
+  }
+}
+async function runNoSecrets(ctx) {
+  try {
+    const nameStatus = await diffNameStatus(ctx.repoRoot, ctx.baseCommit, ctx.headCommit);
+    const envFiles = nameStatus.filter(
+      (c) => (c.status === "A" || c.status === "R") && isMatch(path7.posix.basename(c.path), ".env*")
+    );
+    if (envFiles.length > 0) {
+      const listed = envFiles.slice(0, 5).map((c) => c.path).join(", ") + (envFiles.length > 5 ? ", ..." : "");
+      return {
+        id: "no_secrets",
+        type: "no_secrets",
+        result: "fail",
+        reason: `${envFiles.length} credential file(s) added: ${listed}. Environment files must never be committed \u2014 use .env.example-style templates outside the diff or a secret manager.`
+      };
+    }
+    const { git: git2 } = await Promise.resolve().then(() => (init_git(), git_exports));
+    const r = await git2(["diff", "-U0", ctx.baseCommit, ctx.headCommit], { cwd: ctx.repoRoot });
+    if (r.exitCode !== 0) {
+      return {
+        id: "no_secrets",
+        type: "no_secrets",
+        result: "fail",
+        reason: `git diff failed: ${r.stderr}`
+      };
+    }
+    const addedLines = r.stdout.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).map((l) => l.slice(1)).join("\n");
+    const findings = scan(addedLines, ctx.policy.extra_secret_patterns);
+    if (findings.length > 0) {
+      const masked = findings.slice(0, 5).map((f) => `${f.name}@${f.line}:${f.masked}`).join(", ");
+      return {
+        id: "no_secrets",
+        type: "no_secrets",
+        result: "fail",
+        reason: `${findings.length} secret(s) found: ${masked}${findings.length > 5 ? "..." : ""}`
+      };
+    }
+    return { id: "no_secrets", type: "no_secrets", result: "pass" };
+  } catch (err) {
+    return {
+      id: "no_secrets",
+      type: "no_secrets",
+      result: "fail",
+      reason: `no_secrets error: ${err.message}`
+    };
+  }
+}
+async function runReportMatches(ctx) {
+  if (!ctx.report) {
+    return {
+      id: "report_matches",
+      type: "report_matches",
+      result: "fail",
+      reason: "no report at project-memory/reports/R-*.md on branch " + ctx.headCommit.slice(0, 12) + " \u2014 claims not recorded, questions not surfaced"
+    };
+  }
+  const { git: git2 } = await Promise.resolve().then(() => (init_git(), git_exports));
+  let headOk = ctx.report.head_commit === ctx.headCommit || ctx.headCommit.startsWith(ctx.report.head_commit);
+  if (!headOk) {
+    try {
+      const r = await git2(["merge-base", "--is-ancestor", ctx.report.head_commit, ctx.headCommit], { cwd: ctx.repoRoot });
+      headOk = r.exitCode === 0;
+    } catch {
+    }
+  }
+  if (!headOk) {
+    return {
+      id: "report_matches",
+      type: "report_matches",
+      result: "fail",
+      reason: `head_commit in report (${ctx.report.head_commit.slice(0, 12)}) is not the verified head (${ctx.headCommit.slice(0, 12)}) or an ancestor`
+    };
+  }
+  try {
+    const diffFiles = await diffNameOnly(ctx.repoRoot, ctx.baseCommit, ctx.headCommit);
+    const relevantDiff = diffFiles.filter((f) => !f.match(/^project-memory\/reports\/R-\d+\.md$/));
+    const reportSet = new Set(ctx.report.changed_files);
+    const diffSet = new Set(relevantDiff);
+    const missing = relevantDiff.filter((f) => !reportSet.has(f));
+    const extra = ctx.report.changed_files.filter((f) => !diffSet.has(f));
+    if (missing.length > 0 || extra.length > 0) {
+      const parts = [];
+      if (missing.length > 0) parts.push(`missing ${missing.length} in report (${missing.slice(0, 3).join(", ")})`);
+      if (extra.length > 0) parts.push(`extra ${extra.length} in report (${extra.slice(0, 3).join(", ")})`);
+      return {
+        id: "report_matches",
+        type: "report_matches",
+        result: "fail",
+        reason: parts.join("; ")
+      };
+    }
+    return { id: "report_matches", type: "report_matches", result: "pass" };
+  } catch (err) {
+    return {
+      id: "report_matches",
+      type: "report_matches",
+      result: "fail",
+      reason: `report_matches error: ${err.message}`
+    };
+  }
+}
+async function enforceProtectedPaths(ctx, allowProtected) {
+  const globs = ctx.policy.protected_paths ?? [];
+  if (globs.length === 0) return { row: null, restored: [] };
+  const changed = await diffNameOnly(ctx.repoRoot, ctx.baseCommit, ctx.headCommit);
+  let hits = changed.filter((p) => globs.some((g) => isMatch(p, g)));
+  const pkgHits = hits.filter((p) => path7.posix.basename(p) === "package.json");
+  if (pkgHits.length > 0) {
+    const stillChanged = [];
+    for (const p of pkgHits) {
+      let scriptsChanged = true;
+      try {
+        const baseText = await readFileAtRef(ctx.repoRoot, ctx.baseCommit, p);
+        const headText = await readFileAtRef(ctx.repoRoot, ctx.headCommit, p);
+        scriptsChanged = packageJsonScriptsChanged(baseText, headText);
+      } catch {
+      }
+      if (scriptsChanged) stillChanged.push(p);
+    }
+    hits = hits.filter((p) => !pkgHits.includes(p) || stillChanged.includes(p));
+  }
+  if (hits.length === 0) return { row: null, restored: [] };
+  const listed = hits.slice(0, 5).join(", ") + (hits.length > 5 ? ", ..." : "");
+  if (allowProtected) {
+    return {
+      row: {
+        id: "protected_paths",
+        type: "protected_paths",
+        result: "pass",
+        reason: `worker modified protected files with explicit allow_protected \u2014 judged by worker versions: ${listed}`
+      },
+      restored: []
+    };
+  }
+  const restored = [];
+  for (const p of hits) {
+    const abs = path7.join(ctx.worktreePath, p);
+    try {
+      const baseContent = await readFileAtRef(ctx.repoRoot, ctx.baseCommit, p);
+      await mkdir3(path7.dirname(abs), { recursive: true });
+      await writeFile4(abs, baseContent, "utf8");
+    } catch {
+      await rm(abs, { force: true }).catch(() => {
+      });
+    }
+    restored.push(p);
+  }
+  return {
+    row: {
+      id: "protected_paths",
+      type: "protected_paths",
+      result: "fail",
+      reason: `worker modified protected files (${listed}); checks ran against the locked merge-base versions. If the task legitimately changes tests, create it with --allow-protected.`
+    },
+    restored
+  };
+}
+async function runAllChecks(ctx, checks) {
+  const results = [];
+  for (const check of checks) {
+    const checkId = check.id;
+    const checkType = check.type;
+    const checkDescription = "description" in check ? check.description : void 0;
+    let result;
+    switch (check.type) {
+      case "diff_scope":
+        result = await runDiffScope(ctx, check);
+        break;
+      case "cmd":
+        result = await runCmd(ctx, check);
+        break;
+      case "grep":
+        result = await runGrep(ctx, check);
+        break;
+      case "file_exists":
+        result = await runFileExists(ctx, check);
+        break;
+      case "contract":
+        result = await runContract(ctx, check);
+        break;
+      case "no_secrets":
+        result = await runNoSecrets(ctx);
+        break;
+      default:
+        result = {
+          id: checkId,
+          type: checkType,
+          description: checkDescription,
+          result: "fail",
+          reason: `unknown check type: ${checkType}`
+        };
+    }
+    results.push(result);
+  }
+  results.push(await runReportMatches(ctx));
+  return results;
+}
+
+// src/commands/task.ts
+init_lock();
+init_hash();
+init_ledger_file();
+init_git();
 
 // src/core/verdicts.ts
 function strengthOf(type) {
@@ -853,6 +2881,7 @@ function strengthOf(type) {
       return "artifact";
     case "diff_scope":
     case "no_secrets":
+    case "protected_paths":
       return "hygiene";
     default:
       return "hygiene";
@@ -865,6 +2894,7 @@ function verdict(results) {
 }
 
 // src/commands/task.ts
+init_ledger_replay();
 function nowIso2() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
@@ -907,7 +2937,7 @@ ${fmText}
 ${body}`;
 }
 async function listTaskIds(repoRoot) {
-  const dir = path3.join(repoRoot, "project-memory/tasks");
+  const dir = path8.join(repoRoot, "project-memory/tasks");
   let files;
   try {
     files = await readdir2(dir);
@@ -939,21 +2969,24 @@ async function taskNew(repoRoot, opts) {
     if (opts.depends && opts.depends.length > 0) {
       fm.depends_on = opts.depends;
     }
+    if (opts.allowProtected) {
+      fm.allow_protected = true;
+    }
     TaskSchema.parse(fm);
-    const filePath = path3.join(repoRoot, "project-memory/tasks", `${id}.md`);
+    const filePath = path8.join(repoRoot, "project-memory/tasks", `${id}.md`);
     const body = "\n## Objective\n\n## Definition of done\n";
     const finalText = stringifyFrontMatter2(fm, body);
-    await writeFile3(filePath, finalText, "utf8");
+    await writeFile5(filePath, finalText, "utf8");
     return id;
   });
 }
 async function taskReady(repoRoot, taskId, baseBranch = "main", opts = {}) {
   await assertOnBaseBranch(repoRoot, baseBranch, { allowBranch: opts.allowBranch });
   return withLock(repoRoot, async () => {
-    const filePath = path3.join(repoRoot, "project-memory/tasks", `${taskId}.md`);
+    const filePath = path8.join(repoRoot, "project-memory/tasks", `${taskId}.md`);
     let text;
     try {
-      text = await readFile3(filePath, "utf8");
+      text = await readFile5(filePath, "utf8");
     } catch {
       const err = new Error(`task not found: ${taskId}`);
       err.exitCode = 3;
@@ -996,32 +3029,45 @@ async function taskReady(repoRoot, taskId, baseBranch = "main", opts = {}) {
         }
       }
     }
-    const policyPath = path3.join(repoRoot, ".baton/policy.yml");
-    const policyText = await readFile3(policyPath, "utf8").catch(() => "");
+    const policyPath = path8.join(repoRoot, ".baton/policy.yml");
+    const policyText = await readFile5(policyPath, "utf8").catch(() => "");
     const policyRaw = yaml2.parse(policyText);
     const allowedCommands = policyRaw?.allowed_commands ?? [];
     const missingCommands = [];
+    const arrayCmdEntries = [];
     for (const check of task2.checks) {
       if (check.type === "cmd") {
-        const isAllowed = allowedCommands.some((a) => {
-          if (a.endsWith(" *")) return check.run.startsWith(a.slice(0, -2));
-          return a === check.run;
-        });
-        if (!isAllowed) {
-          missingCommands.push(check.run);
+        const argv = Array.isArray(check.run) ? [...check.run] : check.run.split(/\s+/).filter(Boolean);
+        if (!commandAllowed(argv, allowedCommands)) {
+          missingCommands.push(Array.isArray(check.run) ? JSON.stringify(check.run) : check.run);
+          if (Array.isArray(check.run)) {
+            const entry = argv.length === 1 ? argv[0] : argv[0] + " *";
+            if (!arrayCmdEntries.includes(entry)) arrayCmdEntries.push(entry);
+          }
         }
       }
     }
     if (missingCommands.length > 0) {
       if (opts.addAllowlist) {
-        const updatedPolicyText = addCommandsToPolicy(policyText, missingCommands);
-        await writeFile3(policyPath, updatedPolicyText, "utf8");
-        const verifyText = await readFile3(policyPath, "utf8");
+        const toAdd = missingCommands.map((cmd) => {
+          if (!cmd.startsWith('["')) return cmd;
+          try {
+            const argv = JSON.parse(cmd);
+            return argv.length === 1 ? argv[0] : argv[0] + " *";
+          } catch {
+            return cmd;
+          }
+        }).filter((cmd) => !cmd.startsWith('["'));
+        for (const e of arrayCmdEntries) if (!toAdd.includes(e)) toAdd.push(e);
+        const updatedPolicyText = addCommandsToPolicy(policyText, toAdd);
+        await writeFile5(policyPath, updatedPolicyText, "utf8");
+        const verifyText = await readFile5(policyPath, "utf8");
         const verifyRaw = yaml2.parse(verifyText);
         const updatedAllowed = verifyRaw?.allowed_commands ?? [];
-        const stillMissing = missingCommands.filter(
-          (cmd) => !updatedAllowed.some((a) => a === cmd || a.endsWith(" *") && cmd.startsWith(a.slice(0, -2)))
-        );
+        const stillMissing = task2.checks.filter((c) => c.type === "cmd").filter((c) => {
+          const argv = Array.isArray(c.run) ? [...c.run] : c.run.split(/\s+/).filter(Boolean);
+          return !commandAllowed(argv, updatedAllowed);
+        }).map((c) => Array.isArray(c.run) ? JSON.stringify(c.run) : c.run);
         if (stillMissing.length > 0) {
           const err = new Error(
             `failed to add commands to policy.yml. Still missing: ${stillMissing.join(", ")}`
@@ -1093,10 +3139,10 @@ async function taskList(repoRoot, statusFilter) {
   const state = replay(events);
   const result = [];
   for (const id of ids) {
-    const filePath = path3.join(repoRoot, "project-memory/tasks", `${id}.md`);
+    const filePath = path8.join(repoRoot, "project-memory/tasks", `${id}.md`);
     let title = "";
     try {
-      const text = await readFile3(filePath, "utf8");
+      const text = await readFile5(filePath, "utf8");
       const { frontMatter } = parseFrontMatter2(text);
       title = frontMatter.title ?? "";
     } catch {
@@ -1110,9 +3156,9 @@ async function taskList(repoRoot, statusFilter) {
   return result;
 }
 async function taskShow(repoRoot, taskId) {
-  const filePath = path3.join(repoRoot, "project-memory/tasks", `${taskId}.md`);
+  const filePath = path8.join(repoRoot, "project-memory/tasks", `${taskId}.md`);
   try {
-    return await readFile3(filePath, "utf8");
+    return await readFile5(filePath, "utf8");
   } catch {
     const err = new Error(`task not found: ${taskId}`);
     err.exitCode = 3;
@@ -1120,10 +3166,10 @@ async function taskShow(repoRoot, taskId) {
   }
 }
 async function taskLint(repoRoot, taskId) {
-  const filePath = path3.join(repoRoot, "project-memory/tasks", `${taskId}.md`);
+  const filePath = path8.join(repoRoot, "project-memory/tasks", `${taskId}.md`);
   let text;
   try {
-    text = await readFile3(filePath, "utf8");
+    text = await readFile5(filePath, "utf8");
   } catch {
     const err = new Error(`task not found: ${taskId}`);
     err.exitCode = 3;
@@ -1237,8 +3283,8 @@ async function taskUnlock(repoRoot, taskId, reason, opts = {}) {
 }
 
 // src/commands/packet.ts
-import { readFile as readFile5, writeFile as writeFile4, mkdir as mkdir2 } from "node:fs/promises";
-import path5 from "node:path";
+import { readFile as readFile7, writeFile as writeFile6, mkdir as mkdir4 } from "node:fs/promises";
+import path10 from "node:path";
 import * as yaml3 from "yaml";
 
 // src/core/tokens.ts
@@ -1246,45 +3292,8 @@ function estimateTokens(text) {
   return Math.ceil(text.length / 4);
 }
 
-// src/core/secrets.ts
-var SECRET_PATTERNS = [
-  { name: "aws", regex: /AKIA[0-9A-Z]{16}/g },
-  { name: "github", regex: /gh[pousr]_[A-Za-z0-9]{36,}/g },
-  { name: "slack", regex: /xox[baprs]-[A-Za-z0-9-]{10,}/g },
-  { name: "stripe", regex: /sk_live_[A-Za-z0-9]{16,}/g },
-  { name: "private_key", regex: /-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/g },
-  { name: "generic", regex: /(?:api[_-]?key|secret|token|password)\s*[:=]\s*["'][^"']{12,}["']/gi }
-];
-function mask(value) {
-  if (value.length < 8) return "****";
-  return value.slice(0, 4) + "****" + value.slice(-4);
-}
-function scan(text, extra = []) {
-  const all = [...SECRET_PATTERNS];
-  for (const e of extra) {
-    try {
-      all.push({ name: e.name, regex: new RegExp(e.regex, "g") });
-    } catch {
-    }
-  }
-  const findings = [];
-  const lines = text.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? "";
-    for (const p of all) {
-      p.regex.lastIndex = 0;
-      const m = line.match(p.regex);
-      if (m && m.length > 0) {
-        for (const match of m) {
-          findings.push({ line: i + 1, masked: mask(match), name: p.name });
-        }
-      }
-    }
-  }
-  return findings;
-}
-
 // src/core/packet-compile.ts
+init_globs();
 var READS_CAP = 8e3;
 var READS_TRUNCATION_MARKER = (omitted) => `
 [... truncated, ${omitted} chars omitted, see file at <path> ...]`;
@@ -1407,9 +3416,18 @@ function scanPacketForSecrets(packetText, policy) {
   return findings.map((f) => ({ name: f.name, line: f.line, masked: f.masked }));
 }
 
+// src/commands/packet.ts
+init_ledger_file();
+init_hash();
+init_lock();
+init_git();
+init_ledger_replay();
+init_globs();
+
 // src/core/retrieval.ts
-import { readdir as readdir3, readFile as readFile4, stat } from "node:fs/promises";
-import path4 from "node:path";
+init_globs();
+import { readdir as readdir3, readFile as readFile6, stat } from "node:fs/promises";
+import path9 from "node:path";
 var K1 = 1.5;
 var B = 0.75;
 var MAX_FILE_BYTES = 2e5;
@@ -1652,18 +3670,18 @@ function makeSnippet(content, query, maxLines = 3) {
 }
 function isTextCandidate(filePath) {
   const posix = toPosix(filePath).toLowerCase();
-  if (BINARY_EXT.has(path4.posix.extname(posix))) return false;
+  if (BINARY_EXT.has(path9.posix.extname(posix))) return false;
   if (posix.endsWith(".lock") || posix.endsWith(".min.js") || posix.endsWith(".min.css")) return false;
-  const ext = path4.posix.extname(posix);
+  const ext = path9.posix.extname(posix);
   if (ext === "") {
-    const base = path4.posix.basename(posix);
+    const base = path9.posix.basename(posix);
     return /^(makefile|dockerfile|procfile|license|readme|changelog|contributing|authors)$/i.test(base) || base.startsWith(".");
   }
   return true;
 }
 async function collectCandidateFiles(repoRoot, policy, globs) {
   const candidates = [];
-  const root = path4.resolve(repoRoot);
+  const root = path9.resolve(repoRoot);
   const walk = async (dir, rel, depth) => {
     if (depth > 20) return;
     let entries;
@@ -1676,7 +3694,7 @@ async function collectCandidateFiles(repoRoot, policy, globs) {
       const relPath = rel ? `${rel}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
         if (SKIP_DIRS.has(entry.name)) continue;
-        await walk(path4.join(dir, entry.name), relPath, depth + 1);
+        await walk(path9.join(dir, entry.name), relPath, depth + 1);
         continue;
       }
       if (!entry.isFile()) continue;
@@ -1697,11 +3715,11 @@ async function retrieve(repoRoot, policy, query, opts = {}) {
   const files = [];
   for (const rel of paths) {
     if (opts.excludePaths?.has(toPosix(rel))) continue;
-    const abs = path4.join(repoRoot, rel);
+    const abs = path9.join(repoRoot, rel);
     try {
       const st = await stat(abs);
       if (st.size > MAX_FILE_BYTES) continue;
-      const content = await readFile4(abs, "utf8");
+      const content = await readFile6(abs, "utf8");
       if (scan(content, policy.extra_secret_patterns).length > 0) continue;
       if (content.trim().length === 0) continue;
       files.push({ path: toPosix(rel), content });
@@ -1730,7 +3748,7 @@ function parseFrontMatter3(text) {
   return { frontMatter: fm, body };
 }
 async function loadPolicy(repoRoot) {
-  const text = await readFile5(path5.join(repoRoot, ".baton/policy.yml"), "utf8");
+  const text = await readFile7(path10.join(repoRoot, ".baton/policy.yml"), "utf8");
   const raw = yaml3.parse(text);
   return PolicySchema.parse(raw);
 }
@@ -1772,23 +3790,23 @@ async function packet(repoRoot, taskId, opts = {}) {
   const state = replay(events);
   let stateText = "";
   try {
-    stateText = await readFile5(path5.join(repoRoot, "project-memory/STATE.md"), "utf8");
+    stateText = await readFile7(path10.join(repoRoot, "project-memory/STATE.md"), "utf8");
   } catch {
   }
   const essentialsMatch = stateText.match(/## Essentials for every worker\n([\s\S]*?)(?=\n## |\n<!-- baton:generated|$)/);
   const essentials = essentialsMatch?.[1]?.trim() ?? "";
-  const constraintsText = await readFile5(path5.join(repoRoot, "project-memory/CONSTRAINTS.md"), "utf8").catch(() => "");
+  const constraintsText = await readFile7(path10.join(repoRoot, "project-memory/CONSTRAINTS.md"), "utf8").catch(() => "");
   const readsContents = task2.reads ? await Promise.all(task2.reads.map(async (r) => {
-    const content = await readFile5(path5.join(repoRoot, r), "utf8").catch(() => "");
+    const content = await readFile7(path10.join(repoRoot, r), "utf8").catch(() => "");
     return { path: r, content };
   })) : [];
   const acceptedDecisionIds = Array.from(state.decisions.entries()).filter(([, d]) => d.status === "accepted").map(([id]) => id);
   const decisionsWithBodies = await Promise.all(
     acceptedDecisionIds.map(async (id) => {
-      const decisionPath = path5.join(repoRoot, "project-memory/decisions", `${id}.md`);
+      const decisionPath = path10.join(repoRoot, "project-memory/decisions", `${id}.md`);
       let decisionText = "";
       try {
-        decisionText = await readFile5(decisionPath, "utf8");
+        decisionText = await readFile7(decisionPath, "utf8");
       } catch {
       }
       const { frontMatter: dFm, body: dBody } = parseFrontMatter3(decisionText);
@@ -1811,7 +3829,7 @@ async function packet(repoRoot, taskId, opts = {}) {
     key: c.key,
     watch: c.anchor?.watch
   }));
-  const recentCommits = ["(use git log --oneline to see commits)"];
+  const recentCommits2 = ["(use git log --oneline to see commits)"];
   const lastWorker = null;
   let includedFiles = [];
   if (opts.includeFiles) {
@@ -1827,7 +3845,7 @@ async function packet(repoRoot, taskId, opts = {}) {
       }
       let content;
       try {
-        content = await readFile5(path5.join(repoRoot, filePath), "utf8");
+        content = await readFile7(path10.join(repoRoot, filePath), "utf8");
       } catch {
         continue;
       }
@@ -1862,7 +3880,7 @@ async function packet(repoRoot, taskId, opts = {}) {
     conflicts: [],
     verifiedClaims,
     retrieved,
-    recentCommits,
+    recentCommits: recentCommits2,
     lastWorkerOnArea: lastWorker
   }, budget, {
     includeFiles: opts.includeFiles,
@@ -1877,13 +3895,13 @@ async function packet(repoRoot, taskId, opts = {}) {
   const packetSha = sha256Sync(result.text);
   let outputPath;
   if (opts.out) {
-    outputPath = path5.resolve(repoRoot, opts.out);
-    await mkdir2(path5.dirname(outputPath), { recursive: true });
-    await writeFile4(outputPath, result.text, "utf8");
+    outputPath = path10.resolve(repoRoot, opts.out);
+    await mkdir4(path10.dirname(outputPath), { recursive: true });
+    await writeFile6(outputPath, result.text, "utf8");
   } else {
-    outputPath = path5.join(repoRoot, "project-memory/packets", `${taskId}.md`);
-    await mkdir2(path5.dirname(outputPath), { recursive: true });
-    await writeFile4(outputPath, result.text, "utf8");
+    outputPath = path10.join(repoRoot, "project-memory/packets", `${taskId}.md`);
+    await mkdir4(path10.dirname(outputPath), { recursive: true });
+    await writeFile6(outputPath, result.text, "utf8");
   }
   await withLock(repoRoot, async () => {
     const eventId = await nextEventId(repoRoot);
@@ -1910,9 +3928,13 @@ async function packet(repoRoot, taskId, opts = {}) {
 }
 
 // src/commands/report-check.ts
-import { readFile as readFile6 } from "node:fs/promises";
-import path6 from "node:path";
+import { readFile as readFile8 } from "node:fs/promises";
+import path11 from "node:path";
 import * as yaml4 from "yaml";
+init_lock();
+init_ledger_file();
+init_hash();
+init_git();
 function nowIso4() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
@@ -1925,8 +3947,8 @@ function parseFrontMatter4(text) {
 }
 async function reportCheck(repoRoot, reportPath, opts = {}) {
   await assertOnBaseBranch(repoRoot, opts.baseBranch ?? "main", { allowBranch: opts.allowBranch });
-  const absPath = path6.resolve(repoRoot, reportPath);
-  const relPath = path6.relative(repoRoot, absPath);
+  const absPath = path11.resolve(repoRoot, reportPath);
+  const relPath = path11.relative(repoRoot, absPath);
   const match = relPath.match(/^project-memory\/reports\/R-(\d{4})\.md$/);
   if (!match) {
     const err = new Error(`report path must be project-memory/reports/R-XXXX.md, got: ${relPath}`);
@@ -1937,7 +3959,7 @@ async function reportCheck(repoRoot, reportPath, opts = {}) {
   const taskId = `T-${taskNum}`;
   let text;
   try {
-    text = await readFile6(absPath, "utf8");
+    text = await readFile8(absPath, "utf8");
   } catch {
     const err = new Error(`report not found: ${reportPath}`);
     err.exitCode = 3;
@@ -2034,522 +4056,14 @@ async function reportCheck(repoRoot, reportPath, opts = {}) {
 }
 
 // src/commands/verify.ts
-import { rm, mkdir as mkdir4 } from "node:fs/promises";
-import path8 from "node:path";
+import { rm as rm2, mkdir as mkdir5 } from "node:fs/promises";
+import path12 from "node:path";
 import * as yaml5 from "yaml";
-
-// src/core/check-engine.ts
-import { readFile as readFile7, writeFile as writeFile5, mkdir as mkdir3 } from "node:fs/promises";
-import path7 from "node:path";
-
-// src/io/run-process.ts
-import { spawn } from "node:child_process";
-var MAX_OUTPUT = 10 * 1024 * 1024;
-function run(argv, opts) {
-  const timeoutMs = opts.timeoutMs ?? 3e5;
-  const timeoutSeconds = Math.round(timeoutMs / 1e3);
-  const start = Date.now();
-  const passthrough = /* @__PURE__ */ new Set([
-    "PATH",
-    "HOME",
-    "USERPROFILE",
-    "TEMP",
-    "TMPDIR",
-    "LANG",
-    "LC_ALL",
-    "CI",
-    ...opts.envPassthrough ?? []
-  ]);
-  const childEnv = {};
-  for (const [k, v] of Object.entries(opts.env ?? process.env)) {
-    if (v === void 0) continue;
-    if (passthrough.has(k)) {
-      childEnv[k] = v;
-      continue;
-    }
-    if (/TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL/i.test(k)) {
-      continue;
-    }
-  }
-  return new Promise((resolve) => {
-    const p = spawn(argv[0] ?? "", argv.slice(1), {
-      cwd: opts.cwd,
-      shell: false,
-      env: childEnv,
-      detached: true
-      // v1.2 G22: new process group for tree kill
-    });
-    let stdout = "";
-    let stderr = "";
-    let truncated = false;
-    let timedOut = false;
-    let timeoutHandle = null;
-    let resolved = false;
-    const finish = (code) => {
-      if (resolved) return;
-      resolved = true;
-      if (timeoutHandle) clearTimeout(timeoutHandle);
-      resolve({
-        code,
-        stdout,
-        stderr,
-        truncated,
-        timedOut,
-        timeoutSeconds,
-        durationMs: Date.now() - start
-      });
-    };
-    p.stdout?.on("data", (d) => {
-      if (stdout.length < MAX_OUTPUT) stdout += d.toString();
-      else truncated = true;
-    });
-    p.stderr?.on("data", (d) => {
-      if (stderr.length < MAX_OUTPUT) stderr += d.toString();
-      else truncated = true;
-    });
-    p.on("error", () => {
-      finish(1);
-    });
-    p.on("close", (code) => {
-      finish(code);
-    });
-    timeoutHandle = setTimeout(() => {
-      timedOut = true;
-      try {
-        if (p.pid) {
-          try {
-            process.kill(-p.pid, "SIGKILL");
-          } catch {
-            try {
-              p.kill("SIGKILL");
-            } catch {
-            }
-          }
-        }
-      } catch {
-      }
-      setTimeout(() => finish(null), 100);
-    }, timeoutMs);
-  });
-}
-
-// src/core/check-engine.ts
-var ALWAYS_DENIED = [
-  ".baton/**",
-  "project-memory/tasks/**",
-  "project-memory/decisions/**",
-  "project-memory/ledger.jsonl",
-  ".github/workflows/**",
-  // Build artifacts — not source code, should never trip scope
-  "node_modules/**",
-  "dist/**",
-  ".vite/**",
-  "**/.vite/**"
-];
-function pathAllowed(p, allow) {
-  return allow.some((g) => isMatch(p, g));
-}
-async function runDiffScope(ctx, check) {
-  try {
-    const changes = await diffNameStatus(ctx.repoRoot, ctx.baseCommit, ctx.headCommit);
-    const violations = [];
-    for (const change of changes) {
-      if (change.path.match(/^project-memory\/reports\/R-\d+\.md$/)) continue;
-      const isDenied = ALWAYS_DENIED.some((g) => isMatch(change.path, g));
-      if (isDenied) {
-        if (!pathAllowed(change.path, check.allow)) {
-          violations.push(`${change.path} (${change.status}) [denied path not in allow]`);
-        }
-      } else {
-        if (!pathAllowed(change.path, check.allow)) {
-          violations.push(`${change.path} (${change.status}) [outside scope]`);
-        }
-      }
-    }
-    if (violations.length > 0) {
-      return {
-        id: check.id,
-        type: check.type,
-        description: check.description,
-        result: "fail",
-        reason: `${violations.length} file(s) outside allow: ${violations.slice(0, 5).join(", ")}${violations.length > 5 ? "..." : ""}`
-      };
-    }
-    return {
-      id: check.id,
-      type: check.type,
-      description: check.description,
-      result: "pass",
-      anchor: { commit: ctx.headCommit, watch: ctx.taskTouches }
-    };
-  } catch (err) {
-    return {
-      id: check.id,
-      type: check.type,
-      description: check.description,
-      result: "fail",
-      reason: `diff_scope error: ${err.message}`
-    };
-  }
-}
-function sanitize(text) {
-  return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "").replace(/\r/g, "");
-}
-function lastNLines(text, n) {
-  const lines = sanitize(text).split("\n").filter((l) => l.length > 0);
-  return lines.slice(-n).join("\n");
-}
-async function runCmd(ctx, check) {
-  const allowEntry = ctx.policy.allowed_commands.find((a) => {
-    if (a.endsWith(" *")) {
-      return check.run.startsWith(a.slice(0, -2));
-    }
-    return a === check.run;
-  });
-  if (!allowEntry) {
-    return {
-      id: check.id,
-      type: check.type,
-      description: check.description,
-      result: "fail",
-      reason: `command not on allowlist: ${check.run}. Add to .baton/policy.yml allowed_commands.`
-    };
-  }
-  if (allowEntry.endsWith(" *")) {
-    const suffix = check.run.slice(allowEntry.length - 2);
-    if (/[;&|<>`$()\n]/.test(suffix)) {
-      return {
-        id: check.id,
-        type: check.type,
-        description: check.description,
-        result: "fail",
-        reason: `command arguments contain forbidden characters`
-      };
-    }
-  }
-  const argv = check.run.split(/\s+/).filter(Boolean);
-  const result = await run(argv, {
-    cwd: ctx.worktreePath,
-    timeoutMs: ctx.policy.execution.timeout_seconds * 1e3,
-    envPassthrough: ctx.policy.env_passthrough
-  });
-  const logDir = path7.join(ctx.repoRoot, ".baton", "runs", ctx.runId);
-  await mkdir3(logDir, { recursive: true });
-  const logPath = path7.join(logDir, `${check.id}.log`);
-  const logContent = `=== CMD: ${check.run} ===
-=== EXIT: ${result.code} ===
-=== TIMEOUT: ${result.timedOut} ===
-=== DURATION: ${result.durationMs}ms ===
-
---- STDOUT ---
-${result.stdout}
---- STDERR ---
-${result.stderr}
-`;
-  await writeFile5(logPath, logContent, "utf8");
-  const logSha = sha256Sync(logContent);
-  const logMeta = { path: `.baton/runs/${ctx.runId}/${check.id}.log`, sha256: logSha };
-  if (result.timedOut) {
-    return {
-      id: check.id,
-      type: check.type,
-      description: check.description,
-      result: "fail",
-      reason: `timed out after ${result.timeoutSeconds}s. Last 20 lines:
-${lastNLines(result.stderr || result.stdout, 20)}`,
-      log: logMeta
-    };
-  }
-  if (result.code !== 0) {
-    return {
-      id: check.id,
-      type: check.type,
-      description: check.description,
-      result: "fail",
-      reason: `exit ${result.code}. Last 20 lines:
-${lastNLines(result.stderr || result.stdout, 20)}`,
-      log: logMeta
-    };
-  }
-  return {
-    id: check.id,
-    type: check.type,
-    description: check.description,
-    result: "pass",
-    anchor: check.watch ? { commit: ctx.headCommit, watch: check.watch } : void 0,
-    log: logMeta
-  };
-}
-async function runGrep(ctx, check) {
-  try {
-    const filePath = path7.join(ctx.worktreePath, check.file);
-    const content = await readFile7(filePath, "utf8").catch(() => null);
-    if (content === null) {
-      return {
-        id: check.id,
-        type: check.type,
-        description: check.description,
-        result: "fail",
-        reason: `file not found: ${check.file}`
-      };
-    }
-    if (content.length > 1e6) {
-      return {
-        id: check.id,
-        type: check.type,
-        description: check.description,
-        result: "fail",
-        reason: `file exceeds 1MB: ${check.file}`
-      };
-    }
-    const regex = new RegExp(check.pattern);
-    const matches = regex.test(content);
-    const mode = check.mode ?? "must_match";
-    const pass = mode === "must_match" ? matches : !matches;
-    return {
-      id: check.id,
-      type: check.type,
-      description: check.description,
-      result: pass ? "pass" : "fail",
-      reason: pass ? void 0 : `${mode} failed for pattern /${check.pattern}/ in ${check.file}`,
-      anchor: check.watch ? { commit: ctx.headCommit, watch: check.watch } : void 0
-    };
-  } catch (err) {
-    return {
-      id: check.id,
-      type: check.type,
-      description: check.description,
-      result: "fail",
-      reason: `grep error: ${err.message}`
-    };
-  }
-}
-async function runFileExists(ctx, check) {
-  try {
-    const filePath = path7.join(ctx.worktreePath, check.path);
-    const exists = check.exists ?? true;
-    let fileExists2 = false;
-    try {
-      await readFile7(filePath);
-      fileExists2 = true;
-    } catch {
-    }
-    const pass = exists === fileExists2;
-    return {
-      id: check.id,
-      type: check.type,
-      description: check.description,
-      result: pass ? "pass" : "fail",
-      reason: pass ? void 0 : `expected ${check.path} to ${exists ? "exist" : "not exist"}`,
-      anchor: check.watch ? { commit: ctx.headCommit, watch: check.watch } : void 0
-    };
-  } catch (err) {
-    return {
-      id: check.id,
-      type: check.type,
-      description: check.description,
-      result: "fail",
-      reason: `file_exists error: ${err.message}`
-    };
-  }
-}
-async function runContract(ctx, check) {
-  try {
-    const filePath = path7.join(ctx.worktreePath, check.file);
-    const content = await readFile7(filePath, "utf8").catch(() => null);
-    if (content === null) {
-      return {
-        id: check.id,
-        type: check.type,
-        description: check.description,
-        result: "fail",
-        reason: `contract file not found: ${check.file}`
-      };
-    }
-    const ext = path7.extname(check.file).toLowerCase();
-    try {
-      if (ext === ".json") JSON.parse(content);
-      else if (ext === ".yaml" || ext === ".yml") {
-        const yaml13 = await import("yaml");
-        yaml13.parse(content);
-      }
-    } catch (err) {
-      return {
-        id: check.id,
-        type: check.type,
-        description: check.description,
-        result: "fail",
-        reason: `parse failed: ${err.message}`
-      };
-    }
-    if (check.expect && check.expect !== "either") {
-      const changedFiles = await diffNameOnly(ctx.repoRoot, ctx.baseCommit, ctx.headCommit);
-      const isChanged = changedFiles.includes(check.file);
-      if (check.expect === "changed" && !isChanged) {
-        return {
-          id: check.id,
-          type: check.type,
-          description: check.description,
-          result: "fail",
-          reason: `expected ${check.file} to be changed but it wasn't`
-        };
-      }
-      if (check.expect === "unchanged" && isChanged) {
-        return {
-          id: check.id,
-          type: check.type,
-          description: check.description,
-          result: "fail",
-          reason: `expected ${check.file} to be unchanged but it was modified`
-        };
-      }
-    }
-    return {
-      id: check.id,
-      type: check.type,
-      description: check.description,
-      result: "pass",
-      anchor: check.watch ? { commit: ctx.headCommit, watch: check.watch } : void 0
-    };
-  } catch (err) {
-    return {
-      id: check.id,
-      type: check.type,
-      description: check.description,
-      result: "fail",
-      reason: `contract error: ${err.message}`
-    };
-  }
-}
-async function runNoSecrets(ctx) {
-  try {
-    const { git: git2 } = await import("./git-BLFNSQAA.js");
-    const r = await git2(["diff", "-U0", ctx.baseCommit, ctx.headCommit], { cwd: ctx.repoRoot });
-    if (r.exitCode !== 0) {
-      return {
-        id: "no_secrets",
-        type: "no_secrets",
-        result: "fail",
-        reason: `git diff failed: ${r.stderr}`
-      };
-    }
-    const addedLines = r.stdout.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).map((l) => l.slice(1)).join("\n");
-    const findings = scan(addedLines, ctx.policy.extra_secret_patterns);
-    if (findings.length > 0) {
-      const masked = findings.slice(0, 5).map((f) => `${f.name}@${f.line}:${f.masked}`).join(", ");
-      return {
-        id: "no_secrets",
-        type: "no_secrets",
-        result: "fail",
-        reason: `${findings.length} secret(s) found: ${masked}${findings.length > 5 ? "..." : ""}`
-      };
-    }
-    return { id: "no_secrets", type: "no_secrets", result: "pass" };
-  } catch (err) {
-    return {
-      id: "no_secrets",
-      type: "no_secrets",
-      result: "fail",
-      reason: `no_secrets error: ${err.message}`
-    };
-  }
-}
-async function runReportMatches(ctx) {
-  if (!ctx.report) {
-    return {
-      id: "report_matches",
-      type: "report_matches",
-      result: "fail",
-      reason: "no report at project-memory/reports/R-*.md on branch " + ctx.headCommit.slice(0, 12) + " \u2014 claims not recorded, questions not surfaced"
-    };
-  }
-  const { git: git2 } = await import("./git-BLFNSQAA.js");
-  let headOk = ctx.report.head_commit === ctx.headCommit || ctx.headCommit.startsWith(ctx.report.head_commit);
-  if (!headOk) {
-    try {
-      const r = await git2(["merge-base", "--is-ancestor", ctx.report.head_commit, ctx.headCommit], { cwd: ctx.repoRoot });
-      headOk = r.exitCode === 0;
-    } catch {
-    }
-  }
-  if (!headOk) {
-    return {
-      id: "report_matches",
-      type: "report_matches",
-      result: "fail",
-      reason: `head_commit in report (${ctx.report.head_commit.slice(0, 12)}) is not the verified head (${ctx.headCommit.slice(0, 12)}) or an ancestor`
-    };
-  }
-  try {
-    const diffFiles = await diffNameOnly(ctx.repoRoot, ctx.baseCommit, ctx.headCommit);
-    const relevantDiff = diffFiles.filter((f) => !f.match(/^project-memory\/reports\/R-\d+\.md$/));
-    const reportSet = new Set(ctx.report.changed_files);
-    const diffSet = new Set(relevantDiff);
-    const missing = relevantDiff.filter((f) => !reportSet.has(f));
-    const extra = ctx.report.changed_files.filter((f) => !diffSet.has(f));
-    if (missing.length > 0 || extra.length > 0) {
-      const parts = [];
-      if (missing.length > 0) parts.push(`missing ${missing.length} in report (${missing.slice(0, 3).join(", ")})`);
-      if (extra.length > 0) parts.push(`extra ${extra.length} in report (${extra.slice(0, 3).join(", ")})`);
-      return {
-        id: "report_matches",
-        type: "report_matches",
-        result: "fail",
-        reason: parts.join("; ")
-      };
-    }
-    return { id: "report_matches", type: "report_matches", result: "pass" };
-  } catch (err) {
-    return {
-      id: "report_matches",
-      type: "report_matches",
-      result: "fail",
-      reason: `report_matches error: ${err.message}`
-    };
-  }
-}
-async function runAllChecks(ctx, checks) {
-  const results = [];
-  for (const check of checks) {
-    const checkId = check.id;
-    const checkType = check.type;
-    const checkDescription = "description" in check ? check.description : void 0;
-    let result;
-    switch (check.type) {
-      case "diff_scope":
-        result = await runDiffScope(ctx, check);
-        break;
-      case "cmd":
-        result = await runCmd(ctx, check);
-        break;
-      case "grep":
-        result = await runGrep(ctx, check);
-        break;
-      case "file_exists":
-        result = await runFileExists(ctx, check);
-        break;
-      case "contract":
-        result = await runContract(ctx, check);
-        break;
-      case "no_secrets":
-        result = await runNoSecrets(ctx);
-        break;
-      default:
-        result = {
-          id: checkId,
-          type: checkType,
-          description: checkDescription,
-          result: "fail",
-          reason: `unknown check type: ${checkType}`
-        };
-    }
-    results.push(result);
-  }
-  results.push(await runReportMatches(ctx));
-  return results;
-}
-
-// src/commands/verify.ts
+init_lock();
+init_hash();
+init_ledger_file();
+init_git();
+init_ledger_replay();
 function nowIso5() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
@@ -2576,8 +4090,8 @@ async function findWorkerBranch(repoRoot, taskId) {
 }
 async function createWorktree(repoRoot, taskId, runId, head) {
   const pid = process.pid;
-  const wtPath = path8.join(repoRoot, ".baton", "tmp", `wt-${taskId}-${runId}-${pid}`);
-  await mkdir4(path8.dirname(wtPath), { recursive: true });
+  const wtPath = path12.join(repoRoot, ".baton", "tmp", `wt-${taskId}-${runId}-${pid}`);
+  await mkdir5(path12.dirname(wtPath), { recursive: true });
   const r = await git(["worktree", "add", "--detach", wtPath, head], { cwd: repoRoot });
   if (r.exitCode !== 0) {
     throw new Error(`git worktree add failed: ${r.stderr}`);
@@ -2588,7 +4102,7 @@ async function removeWorktree(repoRoot, wtPath) {
   try {
     await git(["worktree", "remove", "--force", wtPath], { cwd: repoRoot });
   } catch {
-    await rm(wtPath, { recursive: true, force: true }).catch(() => {
+    await rm2(wtPath, { recursive: true, force: true }).catch(() => {
     });
   }
 }
@@ -2695,7 +4209,9 @@ async function verify(repoRoot, taskId, opts = {}) {
       runId,
       taskId
     };
+    const protectedOutcome = await enforceProtectedPaths(ctx, task2.allow_protected === true);
     results = await runAllChecks(ctx, task2.checks);
+    if (protectedOutcome.row) results.push(protectedOutcome.row);
   } finally {
     await removeWorktree(repoRoot, wtPath);
   }
@@ -2841,8 +4357,12 @@ function formatVerdictTable(result) {
 }
 
 // src/commands/accept-reject.ts
-import { readFile as readFile9, writeFile as writeFile6 } from "node:fs/promises";
-import path9 from "node:path";
+init_lock();
+init_ledger_file();
+init_git();
+init_ledger_replay();
+import { readFile as readFile10, writeFile as writeFile7 } from "node:fs/promises";
+import path13 from "node:path";
 import * as yaml6 from "yaml";
 function loadDefaultBranch(text) {
   const raw = yaml6.parse(text);
@@ -2859,11 +4379,11 @@ function parseFrontMatter6(text) {
   return { frontMatter: fm, body };
 }
 async function listTaskIds2(repoRoot) {
-  const { readdir: readdir6 } = await import("node:fs/promises");
-  const dir = path9.join(repoRoot, "project-memory/tasks");
+  const { readdir: readdir9 } = await import("node:fs/promises");
+  const dir = path13.join(repoRoot, "project-memory/tasks");
   let files;
   try {
-    files = await readdir6(dir);
+    files = await readdir9(dir);
   } catch {
     return [];
   }
@@ -2872,7 +4392,7 @@ async function listTaskIds2(repoRoot) {
 async function accept(repoRoot, taskId, opts = {}) {
   let baseBranch = "main";
   try {
-    const policyText = await readFile9(path9.join(repoRoot, ".baton/policy.yml"), "utf8");
+    const policyText = await readFile10(path13.join(repoRoot, ".baton/policy.yml"), "utf8");
     baseBranch = loadDefaultBranch(policyText);
   } catch {
   }
@@ -2941,7 +4461,7 @@ async function reject(repoRoot, taskId, opts) {
   }
   let baseBranch = "main";
   try {
-    const policyText = await readFile9(path9.join(repoRoot, ".baton/policy.yml"), "utf8");
+    const policyText = await readFile10(path13.join(repoRoot, ".baton/policy.yml"), "utf8");
     baseBranch = loadDefaultBranch(policyText);
   } catch {
   }
@@ -2953,17 +4473,17 @@ async function reject(repoRoot, taskId, opts) {
       const nums = existing.map((s) => parseInt(s.split("-")[1] ?? "0", 10)).filter((n) => !isNaN(n));
       const next2 = (nums.length ? Math.max(...nums) : 0) + 1;
       followUpTaskId = `T-${String(next2).padStart(4, "0")}`;
-      const rejectedTaskPath = path9.join(repoRoot, "project-memory/tasks", `${taskId}.md`);
+      const rejectedTaskPath = path13.join(repoRoot, "project-memory/tasks", `${taskId}.md`);
       let touches = ["src/**"];
       try {
-        const text = await readFile9(rejectedTaskPath, "utf8");
+        const text = await readFile10(rejectedTaskPath, "utf8");
         const { frontMatter } = parseFrontMatter6(text);
         if (Array.isArray(frontMatter.touches)) touches = frontMatter.touches;
       } catch {
       }
       const content = taskTemplate(followUpTaskId, opts.followUp, touches);
-      const followUpPath = path9.join(repoRoot, "project-memory/tasks", `${followUpTaskId}.md`);
-      await writeFile6(followUpPath, content, "utf8");
+      const followUpPath = path13.join(repoRoot, "project-memory/tasks", `${followUpTaskId}.md`);
+      await writeFile7(followUpPath, content, "utf8");
     }
     const { events } = await readLedger(repoRoot);
     const priorRejections = events.filter((e) => e.type === "rejected" && e.task === taskId).length;
@@ -2997,10 +4517,18 @@ async function reject(repoRoot, taskId, opts) {
   });
 }
 
+// src/cli.ts
+init_git();
+init_stale();
+init_conflicts();
+
 // src/commands/status.ts
-import { readFile as readFile10, writeFile as writeFile7 } from "node:fs/promises";
-import path10 from "node:path";
-import * as yaml7 from "yaml";
+init_ledger_file();
+init_ledger_replay();
+init_git();
+import { readFile as readFile13, writeFile as writeFile8 } from "node:fs/promises";
+import path16 from "node:path";
+import * as yaml9 from "yaml";
 var START_MARKER2 = "<!-- baton:generated -->";
 var END_MARKER2 = "<!-- /baton:generated -->";
 async function status(repoRoot, opts = {}) {
@@ -3008,8 +4536,8 @@ async function status(repoRoot, opts = {}) {
   const state = replay(events);
   let baseBranch = opts.baseBranch ?? "main";
   try {
-    const policyText = await readFile10(path10.join(repoRoot, ".baton/policy.yml"), "utf8");
-    const policyRaw = yaml7.parse(policyText);
+    const policyText = await readFile13(path16.join(repoRoot, ".baton/policy.yml"), "utf8");
+    const policyRaw = yaml9.parse(policyText);
     if (policyRaw?.default_branch) baseBranch = policyRaw.default_branch;
   } catch {
   }
@@ -3037,15 +4565,15 @@ async function status(repoRoot, opts = {}) {
   }
   const conflictCount = 0;
   const nextAction = needsAttention.length > 0 ? `Review ${needsAttention.length} item(s) needing attention.` : "No items need attention. Ready for new work.";
-  const statePath = path10.join(repoRoot, "project-memory/STATE.md");
+  const statePath = path16.join(repoRoot, "project-memory/STATE.md");
   try {
-    const stateText = await readFile10(statePath, "utf8");
+    const stateText = await readFile13(statePath, "utf8");
     if (stateText.includes(START_MARKER2) && stateText.includes(END_MARKER2)) {
       const generated = formatGeneratedBlock(counts, staleCount, conflictCount, baseSha);
       const startIdx = stateText.indexOf(START_MARKER2);
       const endIdx = stateText.indexOf(END_MARKER2) + END_MARKER2.length;
       const updated = stateText.slice(0, startIdx) + generated + stateText.slice(endIdx);
-      await writeFile7(statePath, updated, "utf8");
+      await writeFile8(statePath, updated, "utf8");
     }
   } catch {
   }
@@ -3108,7 +4636,11 @@ function formatStatusOutput(result, verbose) {
   return lines.join("\n");
 }
 
+// src/cli.ts
+init_doctor();
+
 // src/commands/log.ts
+init_ledger_file();
 function sanitize2(text) {
   return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "").replace(/\r/g, "");
 }
@@ -3148,9 +4680,12 @@ async function logCommand(repoRoot, opts = {}) {
 }
 
 // src/commands/status-html.ts
-import { readFile as readFile11, writeFile as writeFile8, mkdir as mkdir5 } from "node:fs/promises";
-import path11 from "node:path";
-import * as yaml8 from "yaml";
+init_ledger_file();
+init_ledger_replay();
+init_git();
+import { readFile as readFile15, writeFile as writeFile9, mkdir as mkdir6 } from "node:fs/promises";
+import path18 from "node:path";
+import * as yaml11 from "yaml";
 function escapeHtml(text) {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
@@ -3199,8 +4734,8 @@ async function statusHtml(repoRoot, opts = {}) {
   const state = replay(events);
   let baseBranch = opts.baseBranch ?? "main";
   try {
-    const policyText = await readFile11(path11.join(repoRoot, ".baton/policy.yml"), "utf8");
-    const policyRaw = yaml8.parse(policyText);
+    const policyText = await readFile15(path18.join(repoRoot, ".baton/policy.yml"), "utf8");
+    const policyRaw = yaml11.parse(policyText);
     if (policyRaw?.default_branch) baseBranch = policyRaw.default_branch;
   } catch {
   }
@@ -3215,7 +4750,7 @@ async function statusHtml(repoRoot, opts = {}) {
     if (!tasksByStatus[status2]) tasksByStatus[status2] = [];
     let title = "";
     try {
-      const taskText = await readFile11(path11.join(repoRoot, "project-memory/tasks", `${id}.md`), "utf8");
+      const taskText = await readFile15(path18.join(repoRoot, "project-memory/tasks", `${id}.md`), "utf8");
       const m = taskText.match(/^title:\s*(.+)$/m);
       if (m) title = m[1].replace(/^["']|["']$/g, "");
     } catch {
@@ -3252,9 +4787,9 @@ async function statusHtml(repoRoot, opts = {}) {
     decisions.push({ id, status: d.status, key: void 0 });
   }
   const html = buildHtml(baseSha, tasksByStatus, needsAttention, staleClaims, recentEvents, claimsByStatus, decisions);
-  const outPath = opts.out ? path11.resolve(repoRoot, opts.out) : path11.join(repoRoot, ".baton", "status.html");
-  await mkdir5(path11.dirname(outPath), { recursive: true });
-  await writeFile8(outPath, html, "utf8");
+  const outPath = opts.out ? path18.resolve(repoRoot, opts.out) : path18.join(repoRoot, ".baton", "status.html");
+  await mkdir6(path18.dirname(outPath), { recursive: true });
+  await writeFile9(outPath, html, "utf8");
   const sizeBytes = Buffer.byteLength(html, "utf8");
   if (sizeBytes > 5 * 1024 * 1024) {
     console.error(`Warning: status.html is ${(sizeBytes / 1024 / 1024).toFixed(1)} MB (threshold 5 MB)`);
@@ -3359,13 +4894,14 @@ function buildHtml(baseSha, tasksByStatus, needsAttention, staleClaims, recentEv
 }
 
 // src/commands/search.ts
-import { readFile as readFile12 } from "node:fs/promises";
-import path12 from "node:path";
-import * as yaml9 from "yaml";
+init_ledger_file();
+import { readFile as readFile16 } from "node:fs/promises";
+import path19 from "node:path";
+import * as yaml12 from "yaml";
 async function loadPolicy2(repoRoot) {
   try {
-    const text = await readFile12(path12.join(repoRoot, ".baton/policy.yml"), "utf8");
-    return PolicySchema.parse(yaml9.parse(text));
+    const text = await readFile16(path19.join(repoRoot, ".baton/policy.yml"), "utf8");
+    return PolicySchema.parse(yaml12.parse(text));
   } catch {
     return PolicySchema.parse({ baton_version: 1 });
   }
@@ -3449,32 +4985,35 @@ function formatSearchResults(matches, total, json) {
 }
 
 // src/commands/next.ts
-import { readFile as readFile13, readdir as readdir4 } from "node:fs/promises";
-import path13 from "node:path";
-import * as yaml10 from "yaml";
+init_ledger_file();
+init_ledger_replay();
+init_globs();
+import { readFile as readFile17, readdir as readdir6 } from "node:fs/promises";
+import path20 from "node:path";
+import * as yaml13 from "yaml";
 var IN_FLIGHT = /* @__PURE__ */ new Set(["assigned", "in_review", "needs_work"]);
-function parseFrontMatter7(text) {
+function parseFrontMatter9(text) {
   const m = text.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
   if (!m) return null;
   try {
-    return yaml10.parse(m[1] ?? "") ?? {};
+    return yaml13.parse(m[1] ?? "") ?? {};
   } catch {
     return null;
   }
 }
 async function loadTaskFiles(repoRoot) {
-  const dir = path13.join(repoRoot, "project-memory/tasks");
+  const dir = path20.join(repoRoot, "project-memory/tasks");
   const out = /* @__PURE__ */ new Map();
   let files;
   try {
-    files = await readdir4(dir);
+    files = await readdir6(dir);
   } catch {
     return out;
   }
   for (const f of files.filter((f2) => /^T-\d{4}\.md$/.test(f2))) {
     try {
-      const text = await readFile13(path13.join(dir, f), "utf8");
-      const fm = parseFrontMatter7(text);
+      const text = await readFile17(path20.join(dir, f), "utf8");
+      const fm = parseFrontMatter9(text);
       if (!fm) continue;
       const id = String(fm.id ?? f.replace(/\.md$/, ""));
       out.set(id, {
@@ -3569,16 +5108,20 @@ function formatNextOutput(r) {
   return lines.join("\n");
 }
 
+// src/cli.ts
+init_done();
+
 // src/commands/workers.ts
-import { readFile as readFile14, readdir as readdir5 } from "node:fs/promises";
-import path14 from "node:path";
-import * as yaml11 from "yaml";
+init_ledger_file();
+import { readFile as readFile19, readdir as readdir8 } from "node:fs/promises";
+import path22 from "node:path";
+import * as yaml15 from "yaml";
 var REPORT_RE = /^R-\d{4}\.md$/;
-function parseFrontMatter8(text) {
+function parseFrontMatter11(text) {
   const m = text.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
   if (!m) return null;
   try {
-    return yaml11.parse(m[1] ?? "") ?? {};
+    return yaml15.parse(m[1] ?? "") ?? {};
   } catch {
     return null;
   }
@@ -3597,13 +5140,13 @@ async function workers(repoRoot) {
   const workerByTask = /* @__PURE__ */ new Map();
   let dir = [];
   try {
-    dir = await readdir5(path14.join(repoRoot, "project-memory/reports"));
+    dir = await readdir8(path22.join(repoRoot, "project-memory/reports"));
   } catch {
   }
   for (const f of dir.filter((f2) => REPORT_RE.test(f2))) {
     try {
-      const text = await readFile14(path14.join(repoRoot, "project-memory/reports", f), "utf8");
-      const fm = parseFrontMatter8(text);
+      const text = await readFile19(path22.join(repoRoot, "project-memory/reports", f), "utf8");
+      const fm = parseFrontMatter11(text);
       const task2 = typeof fm?.task === "string" ? fm.task : "";
       const worker = typeof fm?.worker === "string" ? fm.worker : "";
       if (task2 && worker && !workerByTask.has(task2)) workerByTask.set(task2, worker);
@@ -3640,6 +5183,8 @@ function formatWorkersOutput(list) {
   }
   const lines = [
     "Worker reputation (score = 10\xB7accepted \u2212 5\xB7rejected \u2212 1\xB7verify_failures):",
+    "ADVISORY \u2014 worker names are self-declared in report front matter and are not",
+    "bound to a lease or the ledger writer; treat rankings as a dispatch hint.",
     ""
   ];
   for (const w of list) {
@@ -3649,32 +5194,36 @@ function formatWorkersOutput(list) {
 }
 
 // src/commands/lease.ts
-import { readFile as readFile15 } from "node:fs/promises";
-import path15 from "node:path";
-import * as yaml12 from "yaml";
-function nowIso7() {
+import { readFile as readFile20 } from "node:fs/promises";
+import path23 from "node:path";
+import * as yaml16 from "yaml";
+init_ledger_file();
+init_lock();
+init_ledger_replay();
+init_globs();
+function nowIso9() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
 async function loadPolicy3(repoRoot) {
-  const text = await readFile15(path15.join(repoRoot, ".baton/policy.yml"), "utf8");
-  return yaml12.parse(text);
+  const text = await readFile20(path23.join(repoRoot, ".baton/policy.yml"), "utf8");
+  return yaml16.parse(text);
 }
-function parseFrontMatter9(text) {
+function parseFrontMatter12(text) {
   const m = text.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
   if (!m) throw new Error("front matter not found");
-  return yaml12.parse(m[1] ?? "");
+  return yaml16.parse(m[1] ?? "");
 }
 async function loadTaskAreas(repoRoot, taskId) {
-  const taskPath = path15.join(repoRoot, "project-memory/tasks", `${taskId}.md`);
+  const taskPath = path23.join(repoRoot, "project-memory/tasks", `${taskId}.md`);
   let text;
   try {
-    text = await readFile15(taskPath, "utf8");
+    text = await readFile20(taskPath, "utf8");
   } catch {
     const err = new Error(`task ${taskId} not found at ${taskPath}`);
     err.exitCode = 3;
     throw err;
   }
-  const task2 = TaskSchema.parse(parseFrontMatter9(text));
+  const task2 = TaskSchema.parse(parseFrontMatter12(text));
   return task2.touches;
 }
 async function leaseTake(repoRoot, taskId, opts) {
@@ -3707,7 +5256,7 @@ async function leaseTake(repoRoot, taskId, opts) {
     await appendLedger(repoRoot, {
       v: 1,
       id: eventId,
-      ts: nowIso7(),
+      ts: nowIso9(),
       type: "lease_acquired",
       task: taskId,
       worker: opts.worker,
@@ -3735,7 +5284,7 @@ async function leaseRelease(repoRoot, taskId, opts) {
     await appendLedger(repoRoot, {
       v: 1,
       id: eventId,
-      ts: nowIso7(),
+      ts: nowIso9(),
       type: "lease_released",
       task: taskId,
       reason: opts.reason
@@ -3759,8 +5308,13 @@ function formatLeaseTable(leases) {
 }
 
 // src/commands/gate.ts
-import { writeFile as writeFile9, mkdir as mkdir6 } from "node:fs/promises";
-import path16 from "node:path";
+init_doctor();
+init_stale();
+init_conflicts();
+init_ledger_replay();
+init_ledger_file();
+import { writeFile as writeFile10, mkdir as mkdir7 } from "node:fs/promises";
+import path24 from "node:path";
 async function gate(repoRoot, opts = {}) {
   const checks = [];
   const doctorResult = await doctor(repoRoot);
@@ -3811,7 +5365,7 @@ async function gate(repoRoot, opts = {}) {
   }
   checks.push({ name: "tasks", pass: taskPass, detail: taskDetail });
   if (opts.strictDone) {
-    const { done: done2 } = await import("./done-WQ5D25KO.js");
+    const { done: done2 } = await Promise.resolve().then(() => (init_done(), done_exports));
     const doneResult = await done2(repoRoot);
     checks.push({
       name: "done",
@@ -3855,22 +5409,26 @@ jobs:
         run: baton gate
 `;
 async function gateInit(repoRoot) {
-  const workflowPath = path16.join(repoRoot, ".github/workflows/baton-gate.yml");
+  const workflowPath = path24.join(repoRoot, ".github/workflows/baton-gate.yml");
   let created = true;
   try {
-    const { readFile: readFile17 } = await import("node:fs/promises");
-    await readFile17(workflowPath, "utf8");
+    const { readFile: readFile22 } = await import("node:fs/promises");
+    await readFile22(workflowPath, "utf8");
     created = false;
   } catch {
-    await mkdir6(path16.dirname(workflowPath), { recursive: true });
-    await writeFile9(workflowPath, GATE_WORKFLOW, "utf8");
+    await mkdir7(path24.dirname(workflowPath), { recursive: true });
+    await writeFile10(workflowPath, GATE_WORKFLOW, "utf8");
   }
   return { path: ".github/workflows/baton-gate.yml", created };
 }
 
 // src/mcp/server.ts
 import * as readline from "node:readline";
-import { readFile as readFile16 } from "node:fs/promises";
+init_stale();
+init_conflicts();
+init_doctor();
+init_done();
+import { readFile as readFile21 } from "node:fs/promises";
 var SERVER_VERSION = "1.3.0";
 var DEFAULT_PROTOCOL_VERSION = "2025-06-18";
 var TOOLS = [
@@ -3919,7 +5477,7 @@ var TOOLS = [
       if (!result.outputPath) {
         throw new Error("packet compiled but no output path was returned");
       }
-      const text = await readFile16(result.outputPath, "utf8");
+      const text = await readFile21(result.outputPath, "utf8");
       const header = `# packet: ${result.outputPath}
 # tokens: ~${result.tokensUsed}/${result.budget}  sha256: ${result.packetSha}
 # omitted: ${result.omitted.length > 0 ? result.omitted.join(", ") : "none"}
@@ -4301,7 +5859,7 @@ decide.command("reject <D-id>").option("--allow-branch", "allow running on non-b
   }
 });
 var task = program.command("task");
-task.command("new <title>").option("--touches <globs>", "comma-separated globs for allowed files").option("--depends <t-ids>", "comma-separated task IDs this depends on").action(async (title, opts) => {
+task.command("new <title>").option("--touches <globs>", "comma-separated globs for allowed files").option("--depends <t-ids>", "comma-separated task IDs this depends on").option("--allow-protected", "worker may edit protected_paths (test files) \u2014 verify will judge with the worker versions").action(async (title, opts) => {
   if (!opts.touches) {
     console.error("ERROR task new: --touches is required");
     process.exit(2);
@@ -4310,7 +5868,8 @@ task.command("new <title>").option("--touches <globs>", "comma-separated globs f
     const id = await taskNew(process.cwd(), {
       title,
       touches: opts.touches.split(",").map((s) => s.trim()).filter(Boolean),
-      depends: opts.depends ? opts.depends.split(",").map((s) => s.trim()).filter(Boolean) : void 0
+      depends: opts.depends ? opts.depends.split(",").map((s) => s.trim()).filter(Boolean) : void 0,
+      allowProtected: opts.allowProtected === true
     });
     console.log(`Created task ${id} (draft). Edit the file, commit on main, then run: baton task ready ${id}`);
   } catch (err) {
@@ -4546,9 +6105,20 @@ program.command("status").description("show project status summary").option("--v
     process.exit(e.exitCode ?? 1);
   }
 });
-program.command("doctor").description("check structural integrity").option("--allow-branch", "allow running on non-base branch").action(async (opts) => {
+program.command("doctor").description("check structural integrity").option("--fix", "repair ledger ID collisions from merged branches (renumber + remap claim/run IDs)").option("--allow-branch", "allow running on non-base branch").action(async (opts) => {
   try {
-    const result = await doctor(process.cwd());
+    let result = await doctor(process.cwd());
+    if (opts.fix && result.hasErrors) {
+      const fix = await doctorFix(process.cwd());
+      if (fix.changed) {
+        console.log(`repair: renumbered ${fix.renumbered} event(s), remapped ${fix.remappedClaims} claim ID(s), remapped ${fix.remappedRuns} run ID(s); ledger_repaired event appended`);
+      } else {
+        console.log("repair: ledger already consistent, nothing to do");
+      }
+      result = await doctor(process.cwd());
+    } else if (opts.fix) {
+      console.log("repair: not needed, no ledger errors found");
+    }
     console.log(formatDoctorOutput(result));
     if (result.hasErrors) process.exit(3);
   } catch (err) {

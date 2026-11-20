@@ -9,7 +9,10 @@ export const CheckSchema = z.discriminatedUnion('type', [
     id: z.string().min(1).max(60),
     description: z.string().min(1).max(120).optional(),
     type: z.literal('cmd'),
-    run: z.string().min(1),
+    // v1.3.2: string form (split on whitespace, for simple commands) or argv
+    // array (tokens passed verbatim, so quoted arguments like -t "a b"
+    // survive). shell stays false in both cases.
+    run: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]),
     covers: z.array(z.string()).optional(),
     watch: z.array(z.string()).optional(),
   }),
@@ -89,9 +92,10 @@ export const TaskSchema = z.object({
       });
     }
   }
-  // Forbidden chars in cmd run strings (spec §3.3 policy)
+  // Forbidden chars in cmd run strings (spec §3.3 policy). Only applies to the
+  // string form; array tokens are passed verbatim (inert under shell: false).
   for (const c of t.checks) {
-    if (c.type === 'cmd') {
+    if (c.type === 'cmd' && typeof c.run === 'string') {
       if (/[;&|<>`$()\n]/.test(c.run)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -153,6 +157,10 @@ export const PolicySchema = z.object({
     acknowledged: z.boolean().default(false),
     timeout_seconds: z.number().int().positive().default(300),
     docker_image: z.string().default(''),
+    // v1.3.2: none (default) = run directly on this machine (per-run HOME/TMPDIR
+    // isolation only). docker = wrap cmd checks in a no-network container whose
+    // only mounted path is the worktree. doctor warns when none is used outside CI.
+    sandbox: z.enum(['none', 'docker']).default('none'),
   }).default({}),
   allowed_commands: z.array(z.string()).default([]),
   env_passthrough: z.array(z.string()).default([]),
@@ -179,11 +187,23 @@ export const PolicySchema = z.object({
   // v1.3.1: files the worker is judged by. If a worker edits these and the task
   // does not set allow_protected, verify restores the merge-base versions before
   // running checks and fails a protected_paths row. Set [] to disable.
+  // v1.3.2: also protects the files that define HOW tests run. Special case:
+  // for package.json only changes to the `scripts` block count as protected —
+  // dependency edits stay allowed.
   protected_paths: z.array(z.string()).default([
     'test/**',
     'tests/**',
     '**/*.test.*',
     '**/*.spec.*',
+    'package.json',
+    'vitest.config.*',
+    'jest.config.*',
+    'playwright.config.*',
+    'pytest.ini',
+    'conftest.py',
+    'tox.ini',
+    'tsconfig*.json',
+    'Makefile',
   ]),
 }).strict();
 export type Policy = z.infer<typeof PolicySchema>;
@@ -193,6 +213,10 @@ const baseEvent = z.object({
   v: z.literal(1),
   id: z.string().regex(/^e-\d{6}$/),
   ts: z.string(),
+  // v1.3.2 P3: tamper-evidence. prev_hash = computed hash of the entry this
+  // one was appended after ('' for the very first entry). Optional so legacy
+  // (pre-v1.3.2) ledgers still type-check; doctor verifies when present.
+  prev_hash: z.string().optional(),
 });
 
 export const LedgerEventSchema = z.discriminatedUnion('type', [
